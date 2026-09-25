@@ -36,3 +36,26 @@ describe('compressionSourceOnly recipe flag', () => {
     expect(cfg.compressionSourceOnly).toBe(true);
   });
 });
+
+
+describe('compressionMarker recipe field', () => {
+  test('preserves false as an explicit marker omission and leaves absence undefined', () => {
+    expect(validateRecipe(recipe({ compressionMarker: false })).agent.strategy?.compressionMarker).toBe(false);
+    expect(validateRecipe(recipe({})).agent.strategy?.compressionMarker).toBeUndefined();
+  });
+
+  test('accepts a replacement string and rejects invalid or empty values', () => {
+    expect(validateRecipe(recipe({ compressionMarker: 'a quiet leaf passes' })).agent.strategy?.compressionMarker).toBe('a quiet leaf passes');
+    for (const value of ['', true, 1, null]) {
+      expect(() => validateRecipe(recipe({ compressionMarker: value }))).toThrow(/compressionMarker/);
+    }
+  });
+
+  test('plumbs false into the built autobiographical strategy config', () => {
+    const parsed = validateRecipe(recipe({ compressionMarker: false }));
+    const built = buildFrameworkStrategy(parsed, 'claude-fable-5', 'UTC');
+    const cfg = (built as unknown as { config?: Record<string, unknown> }).config
+      ?? (built as unknown as Record<string, unknown>);
+    expect(cfg.compressionMarker).toBe(false);
+  });
+});

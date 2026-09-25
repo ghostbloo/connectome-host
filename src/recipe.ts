@@ -44,6 +44,9 @@ export interface RecipeStrategy {
   // for what the recipe loader accepts under `agent.strategy`.
   enforceBudget?: boolean;
   maxSpeculativeL1s?: number;
+  /** In-band L1 preamble: undefined uses Context Manager's default, a string
+   * replaces it, and false omits the message entirely. */
+  compressionMarker?: string | false;
   /** Number of coverage-equivalent recall curves to try after the canonical
    * autobiographical compression request is explicitly refused. Zero disables
    * fallback while retaining the canonical attempt. */
@@ -1590,6 +1593,13 @@ export function validateRecipe(raw: unknown): Recipe {
       )
     ) {
       throw new Error('Recipe agent.strategy.compressionContextBudgetTokens must be a positive safe integer.');
+    }
+    if (
+      strategy.compressionMarker !== undefined
+      && strategy.compressionMarker !== false
+      && (typeof strategy.compressionMarker !== 'string' || strategy.compressionMarker.length === 0)
+    ) {
+      throw new Error('Recipe agent.strategy.compressionMarker must be false or a non-empty string.');
     }
     for (const key of [
       'compressionSourceOnly',

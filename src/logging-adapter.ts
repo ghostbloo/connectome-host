@@ -26,7 +26,7 @@ import type {
   ProviderRequestOptions,
   StreamCallbacks,
 } from '@animalabs/membrane';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, closeSync, fsyncSync, openSync } from 'node:fs';
 import { summarizeCacheControls, type ProviderCallRecord } from './call-ledger.js';
 
 /** Live read of the current reasoning setting. The host wires this to
@@ -139,8 +139,18 @@ export class LoggingAnthropicAdapter extends AnthropicAdapter {
   private log(record: Record<string, unknown>): void {
     try {
       appendFileSync(this.logPath, JSON.stringify(record) + '\n');
+      // Crossing warmup enables full payloads because this JSONL is the
+      // durable per-attempt ledger. Flush every completed call before control
+      // returns to Context Manager, so a process death cannot leave a minted
+      // memory whose provider attempt vanished from the crossing record.
+      if (this.fullPayloads) {
+        const fd = openSync(this.logPath, 'r');
+        try { fsyncSync(fd); } finally { closeSync(fd); }
+      }
     } catch {
-      // never throw from logging
+      // Ordinary observability must never throw from logging. Crossing mode
+      // independently refuses convergence when its required ledger is absent
+      // or inconsistent.
     }
   }
 

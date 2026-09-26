@@ -58,4 +58,32 @@ describe('compressionMarker recipe field', () => {
       ?? (built as unknown as Record<string, unknown>);
     expect(cfg.compressionMarker).toBe(false);
   });
+
+  test('passes ordinary instruction and identical-refusal retry policy through', () => {
+    const parsed = validateRecipe(recipe({
+      compressionInstruction: 'Carry this stretch in your own voice. Target ~{targetTokens} tokens.',
+      compressionIdenticalRefusalRetries: 2,
+      compressionRefusalCurveFallbacks: 0,
+      compressionShapeFallbacks: false,
+    }));
+    const built = buildFrameworkStrategy(parsed, 'claude-fable-5', 'UTC');
+    const cfg = (built as unknown as { config?: Record<string, unknown> }).config
+      ?? (built as unknown as Record<string, unknown>);
+    expect(cfg.compressionInstruction).toBe('Carry this stretch in your own voice. Target ~{targetTokens} tokens.');
+    expect(cfg.compressionIdenticalRefusalRetries).toBe(2);
+    expect(cfg.compressionRefusalCurveFallbacks).toBe(0);
+    expect(cfg.compressionShapeFallbacks).toBe(false);
+    for (const value of [-1, 1.5, '2', null]) {
+      expect(() => validateRecipe(recipe({ compressionIdenticalRefusalRetries: value }))).toThrow(
+        /compressionIdenticalRefusalRetries/,
+      );
+    }
+    for (const value of ['', false, 3, null]) {
+      expect(() => validateRecipe(recipe({ compressionInstruction: value }))).toThrow(/compressionInstruction/);
+    }
+    for (const value of ['false', 0, null]) {
+      expect(() => validateRecipe(recipe({ compressionShapeFallbacks: value }))).toThrow(/compressionShapeFallbacks/);
+    }
+  });
+
 });

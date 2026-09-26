@@ -65,6 +65,7 @@ describe('compressionMarker recipe field', () => {
       compressionIdenticalRefusalRetries: 2,
       compressionRefusalCurveFallbacks: 0,
       compressionShapeFallbacks: false,
+      mintCarrierPolicy: 'strip',
     }));
     const built = buildFrameworkStrategy(parsed, 'claude-fable-5', 'UTC');
     const cfg = (built as unknown as { config?: Record<string, unknown> }).config
@@ -73,6 +74,7 @@ describe('compressionMarker recipe field', () => {
     expect(cfg.compressionIdenticalRefusalRetries).toBe(2);
     expect(cfg.compressionRefusalCurveFallbacks).toBe(0);
     expect(cfg.compressionShapeFallbacks).toBe(false);
+    expect(cfg.mintCarrierPolicy).toBe('strip');
     for (const value of [-1, 1.5, '2', null]) {
       expect(() => validateRecipe(recipe({ compressionIdenticalRefusalRetries: value }))).toThrow(
         /compressionIdenticalRefusalRetries/,
@@ -83,6 +85,9 @@ describe('compressionMarker recipe field', () => {
     }
     for (const value of ['false', 0, null]) {
       expect(() => validateRecipe(recipe({ compressionShapeFallbacks: value }))).toThrow(/compressionShapeFallbacks/);
+    }
+    for (const value of ['live-strip', false, 0, null]) {
+      expect(() => validateRecipe(recipe({ mintCarrierPolicy: value }))).toThrow(/mintCarrierPolicy/);
     }
   });
 

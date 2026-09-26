@@ -55,6 +55,8 @@ export interface RecipeStrategy {
   compressionIdenticalRefusalRetries?: number;
   /** Disable non-identical compression shape fallbacks (tool/no-tools, carrier stripping, plain prose). */
   compressionShapeFallbacks?: boolean;
+  /** Replay captured summary reasoning carriers inside compression recall pairs. */
+  mintCarrierPolicy?: 'full' | 'strip';
   /** Ordinary first-person L1 instruction override; `{targetTokens}` is substituted. */
   compressionInstruction?: string;
   /** Complete provider-request admission ceiling for compression fallbacks,
@@ -1608,6 +1610,13 @@ export function validateRecipe(raw: unknown): Recipe {
     }
     if (strategy.compressionShapeFallbacks !== undefined && typeof strategy.compressionShapeFallbacks !== 'boolean') {
       throw new Error('Recipe agent.strategy.compressionShapeFallbacks must be boolean.');
+    }
+    if (
+      strategy.mintCarrierPolicy !== undefined
+      && strategy.mintCarrierPolicy !== 'full'
+      && strategy.mintCarrierPolicy !== 'strip'
+    ) {
+      throw new Error('Recipe agent.strategy.mintCarrierPolicy must be "full" or "strip".');
     }
     if (
       strategy.compressionContextBudgetTokens !== undefined

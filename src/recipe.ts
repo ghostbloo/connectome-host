@@ -77,6 +77,8 @@ export interface RecipeStrategy {
   compressionSplitFallback?: boolean;
   /** Allow a single-message placeholder inside a split-stitched L1 (default off). */
   compressionSplitPlaceholder?: boolean;
+  /** Provider refusal categories eligible for provisional classifier-gap records (default none). */
+  compressionClassifierGapCategories?: string[];
   /** Split-stitch depth floor: 1 = halves, 2 = halves then quarters; unset = legacy. */
   compressionSplitMaxDepth?: number;
   /** Split-stitch: max sub-calls per chunk (default 40). */
@@ -1648,6 +1650,15 @@ export function validateRecipe(raw: unknown): Recipe {
       if (strategy[key] !== undefined && typeof strategy[key] !== 'boolean') {
         throw new Error(`Recipe agent.strategy.${key} must be a boolean.`);
       }
+    }
+    if (
+      strategy.compressionClassifierGapCategories !== undefined
+      && (
+        !Array.isArray(strategy.compressionClassifierGapCategories)
+        || !strategy.compressionClassifierGapCategories.every((c: unknown) => typeof c === 'string' && c.length > 0)
+      )
+    ) {
+      throw new Error('Recipe agent.strategy.compressionClassifierGapCategories must be an array of non-empty strings.');
     }
     for (const key of ['compressionSplitMaxDepth', 'compressionSplitMaxCallsPerChunk', 'compressionSplitMaxCallsPer10Min'] as const) {
       const value = strategy[key];

@@ -75,6 +75,20 @@ describe('standard-recipe memory defaults', () => {
     expect(() => recipe({ name: 'Mira', strategy: { type: 'autobiographical', compressionSplitFallback: 'yes' } })).toThrow();
   });
 
+  test('compressionClassifierGapCategories passes through and is validated', () => {
+    const on = buildFrameworkStrategy(
+      recipe({ name: 'Mira', strategy: { type: 'autobiographical', compressionClassifierGapCategories: ['cyber'] } }),
+      'some-model',
+      'America/Los_Angeles',
+    );
+    expect(configView(on).compressionClassifierGapCategories).toEqual(['cyber']);
+    const omitted = buildFrameworkStrategy(recipe({ name: 'Mira' }), 'some-model', 'America/Los_Angeles');
+    expect(configView(omitted).compressionClassifierGapCategories).toBeUndefined();
+    for (const bad of ['cyber', [''], [1], {}]) {
+      expect(() => recipe({ name: 'Mira', strategy: { type: 'autobiographical', compressionClassifierGapCategories: bad } })).toThrow();
+    }
+  });
+
   test('compressionSplitMaxDepth passes through and is validated as a positive integer', () => {
     const on = buildFrameworkStrategy(
       recipe({ name: 'Mira', strategy: { type: 'autobiographical', compressionSplitFallback: true, compressionSplitMaxDepth: 2 } }),

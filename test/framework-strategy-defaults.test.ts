@@ -75,6 +75,20 @@ describe('standard-recipe memory defaults', () => {
     expect(() => recipe({ name: 'Mira', strategy: { type: 'autobiographical', compressionSplitFallback: 'yes' } })).toThrow();
   });
 
+  test('compressionSplitMaxDepth passes through and is validated as a positive integer', () => {
+    const on = buildFrameworkStrategy(
+      recipe({ name: 'Mira', strategy: { type: 'autobiographical', compressionSplitFallback: true, compressionSplitMaxDepth: 2 } }),
+      'some-model',
+      'America/Los_Angeles',
+    );
+    expect(configView(on).compressionSplitMaxDepth).toBe(2);
+    const omitted = buildFrameworkStrategy(recipe({ name: 'Mira' }), 'some-model', 'America/Los_Angeles');
+    expect(configView(omitted).compressionSplitMaxDepth).toBeUndefined();
+    for (const bad of [0, -1, 1.5, '2']) {
+      expect(() => recipe({ name: 'Mira', strategy: { type: 'autobiographical', compressionSplitMaxDepth: bad } })).toThrow();
+    }
+  });
+
   test('split-stitch cap knobs pass through and are validated as positive integers', () => {
     const on = buildFrameworkStrategy(
       recipe({ name: 'Mira', strategy: { type: 'autobiographical', compressionSplitFallback: true, compressionSplitMaxCallsPerChunk: 12, compressionSplitMaxCallsPer10Min: 30 } }),

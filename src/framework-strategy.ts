@@ -11,7 +11,12 @@ import { isBuiltinStrategyType, type ExtensionRegistry } from './extensions.js';
 const PASSTHROUGH_KEYS: ReadonlyArray<keyof RecipeStrategy> = [
   'enforceBudget',
   'maxSpeculativeL1s',
+  'compressionMarker',
   'compressionRefusalCurveFallbacks',
+  'compressionIdenticalRefusalRetries',
+  'compressionShapeFallbacks',
+  'mintCarrierPolicy',
+  'compressionInstruction',
   'compressionContextBudgetTokens',
   'compressionSourceOnly',
   'compressionSourceOnlyFallback',

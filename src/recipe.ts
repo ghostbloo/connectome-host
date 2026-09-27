@@ -44,10 +44,21 @@ export interface RecipeStrategy {
   // for what the recipe loader accepts under `agent.strategy`.
   enforceBudget?: boolean;
   maxSpeculativeL1s?: number;
+  /** In-band L1 preamble: undefined uses Context Manager's default, a string
+   * replaces it, and false omits the message entirely. */
+  compressionMarker?: string | false;
   /** Number of coverage-equivalent recall curves to try after the canonical
    * autobiographical compression request is explicitly refused. Zero disables
    * fallback while retaining the canonical attempt. */
   compressionRefusalCurveFallbacks?: number;
+  /** Number of identical normalized-request retries after a compression refusal. */
+  compressionIdenticalRefusalRetries?: number;
+  /** Disable non-identical compression shape fallbacks (tool/no-tools, carrier stripping, plain prose). */
+  compressionShapeFallbacks?: boolean;
+  /** Replay captured summary reasoning carriers inside compression recall pairs. */
+  mintCarrierPolicy?: 'full' | 'strip';
+  /** Ordinary first-person L1 instruction override; `{targetTokens}` is substituted. */
+  compressionInstruction?: string;
   /** Complete provider-request admission ceiling for compression fallbacks,
    * including the output reserve. */
   compressionContextBudgetTokens?: number;
@@ -1582,6 +1593,32 @@ export function validateRecipe(raw: unknown): Recipe {
       throw new Error('Recipe agent.strategy.compressionRefusalCurveFallbacks must be a non-negative safe integer.');
     }
     if (
+      strategy.compressionIdenticalRefusalRetries !== undefined
+      && (
+        typeof strategy.compressionIdenticalRefusalRetries !== 'number'
+        || !Number.isSafeInteger(strategy.compressionIdenticalRefusalRetries)
+        || strategy.compressionIdenticalRefusalRetries < 0
+      )
+    ) {
+      throw new Error('Recipe agent.strategy.compressionIdenticalRefusalRetries must be a non-negative safe integer.');
+    }
+    if (
+      strategy.compressionInstruction !== undefined
+      && (typeof strategy.compressionInstruction !== 'string' || strategy.compressionInstruction.length === 0)
+    ) {
+      throw new Error('Recipe agent.strategy.compressionInstruction must be a non-empty string.');
+    }
+    if (strategy.compressionShapeFallbacks !== undefined && typeof strategy.compressionShapeFallbacks !== 'boolean') {
+      throw new Error('Recipe agent.strategy.compressionShapeFallbacks must be boolean.');
+    }
+    if (
+      strategy.mintCarrierPolicy !== undefined
+      && strategy.mintCarrierPolicy !== 'full'
+      && strategy.mintCarrierPolicy !== 'strip'
+    ) {
+      throw new Error('Recipe agent.strategy.mintCarrierPolicy must be "full" or "strip".');
+    }
+    if (
       strategy.compressionContextBudgetTokens !== undefined
       && (
         typeof strategy.compressionContextBudgetTokens !== 'number'
@@ -1590,6 +1627,13 @@ export function validateRecipe(raw: unknown): Recipe {
       )
     ) {
       throw new Error('Recipe agent.strategy.compressionContextBudgetTokens must be a positive safe integer.');
+    }
+    if (
+      strategy.compressionMarker !== undefined
+      && strategy.compressionMarker !== false
+      && (typeof strategy.compressionMarker !== 'string' || strategy.compressionMarker.length === 0)
+    ) {
+      throw new Error('Recipe agent.strategy.compressionMarker must be false or a non-empty string.');
     }
     for (const key of [
       'compressionSourceOnly',

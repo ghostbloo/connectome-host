@@ -7,7 +7,7 @@
       "dependencies": {
         "@animalabs/agent-framework": "^0.13.0",
         "@animalabs/chronicle": "^0.3.0",
-        "@animalabs/context-manager": "github:ghostbloo/context-manager#f9d43774cc9ae567e1591f9dbc12d09c68983b42",
+        "@animalabs/context-manager": "github:ghostbloo/context-manager#9daf97a52ef98469142be5b6c5a55fdd047cfb1b",
         "@animalabs/membrane": "^0.5.82",
         "@opentui/core": "^0.1.82",
       },
@@ -22,14 +22,14 @@
     "@animalabs/context-manager",
   ],
   "overrides": {
-    "@animalabs/context-manager": "github:ghostbloo/context-manager#f9d43774cc9ae567e1591f9dbc12d09c68983b42",
+    "@animalabs/context-manager": "github:ghostbloo/context-manager#9daf97a52ef98469142be5b6c5a55fdd047cfb1b",
   },
   "packages": {
     "@animalabs/agent-framework": ["@animalabs/agent-framework@0.13.0", "", { "dependencies": { "@animalabs/chronicle": "^0.3.0", "@animalabs/context-manager": "^0.8.0", "@animalabs/membrane": "^0.5.78", "chokidar": "^4.0.3", "discord.js": "^14.25.1", "ws": "^8.18.0" }, "bin": { "agent-framework-mcp": "dist/src/api/mcp-server.js", "agent-framework-recover": "dist/src/recovery/recover-cli.js" } }, "sha512-j4QY9pEjOHdmqnwyUPp4NU6fW1f5EHb3Lp+ygoAB3LKj2QjLITlglNFNuLqjRWtGiwwamSopcuqgbwHwAp0wyQ=="],
 
     "@animalabs/chronicle": ["@animalabs/chronicle@0.3.0", "", {}, "sha512-6BBJ9pWb8AnuHTNJTU07Y6Wut3IvdgWFxsy05IdlWcEnR5W23dlaBlaeJq7gDc7TwX05HfsDC+QZFEc69G+s4Q=="],
 
-    "@animalabs/context-manager": ["@animalabs/context-manager@github:ghostbloo/context-manager#f9d4377", { "dependencies": { "@animalabs/chronicle": "^0.3.0", "@animalabs/membrane": "^0.5.69" } }, "ghostbloo-context-manager-f9d4377", "sha512-C7jMtNv8ZSJ+/xn4CDVGbOEDz474G19gO2z3mM18FqyQZQlRaTkD/AB+ebmkvOXxQxUG9p7ivuOAZrU7h4MtjA=="],
+    "@animalabs/context-manager": ["@animalabs/context-manager@github:ghostbloo/context-manager#9daf97a", { "dependencies": { "@animalabs/chronicle": "^0.3.0", "@animalabs/membrane": "^0.5.69" } }, "ghostbloo-context-manager-9daf97a", "sha512-rDZ+IAmpdMqOGFcV0MUmiR4DGVzHILqvDyQCp37WjWMzB+y1/HC6OU8AjQ6yzHBP4f5R7L+4CSodavop3uspnA=="],
 
     "@animalabs/membrane": ["@animalabs/membrane@0.5.82", "", { "dependencies": { "@anthropic-ai/sdk": "^0.52.0" } }, "sha512-kCI3s/HXnXBPVcYCXIZfsdJBLRj77j5QyA9Hor1mC/nyD35D7e7N/VgR9awxqdGGWgIvgpjs6owXbGMk5t1pQA=="],
 

@@ -264,7 +264,10 @@ export async function runTui(app: AppContext): Promise<void> {
   const membrane = app.membrane;
 
   // Redirect stderr to a log file — console.error is invisible once the TUI owns the terminal
-  const logDir = process.env.DATA_DIR || './data';
+  if (!process.env.DATA_DIR) {
+    throw new Error('Missing env var: DATA_DIR');
+  }
+  const logDir = process.env.DATA_DIR;
   mkdirSync(logDir, { recursive: true });
   const logPath = `${logDir}/tui-error.log`;
   const logStream = createWriteStream(logPath, { flags: 'a' });

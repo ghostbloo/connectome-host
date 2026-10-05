@@ -78,6 +78,10 @@ export type { AppContext };
 const headless = process.argv.includes('--headless');
 const noTui = !headless && (process.argv.includes('--no-tui') || !process.stdin.isTTY);
 
+if (!process.env.DATA_DIR) {
+  throw new Error('Missing env var: DATA_DIR');
+}
+
 const config = {
   apiKey: process.env.ANTHROPIC_API_KEY,
   // OAuth/Bearer token (e.g. a Claude subscription token). When set, it takes
@@ -91,7 +95,7 @@ const config = {
   openaiCompatibleApiKey: process.env.OPENAI_COMPATIBLE_API_KEY,
   codexBinary: process.env.CODEX_BINARY,
   model: process.env.MODEL,
-  dataDir: process.env.DATA_DIR || './data',
+  dataDir: process.env.DATA_DIR,
 };
 
 // ---------------------------------------------------------------------------

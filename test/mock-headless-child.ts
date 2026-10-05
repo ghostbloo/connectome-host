@@ -25,7 +25,11 @@ import { createServer, type Socket } from 'node:net';
 import { join, resolve } from 'node:path';
 import { existsSync, unlinkSync, mkdirSync, writeFileSync } from 'node:fs';
 
-const dataDir = resolve(process.env.DATA_DIR || './data');
+if (!process.env.DATA_DIR) {
+  throw new Error('Missing env var: DATA_DIR');
+}
+
+const dataDir = resolve(process.env.DATA_DIR);
 mkdirSync(dataDir, { recursive: true });
 const socketPath = join(dataDir, 'ipc.sock');
 const pidPath = join(dataDir, 'headless.pid');

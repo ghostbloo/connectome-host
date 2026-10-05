@@ -58,7 +58,10 @@ function parseHeadlessArgs(argv: string[]): HeadlessOptions {
 
 export async function runHeadless(app: AppContext, argv: string[] = []): Promise<void> {
   const opts = parseHeadlessArgs(argv);
-  const dataDir = resolve(process.env.DATA_DIR || './data');
+  if (!process.env.DATA_DIR) {
+    throw new Error('Missing env var: DATA_DIR');
+  }
+  const dataDir = resolve(process.env.DATA_DIR);
   const socketPath = opts.socketPath ?? join(dataDir, 'ipc.sock');
   const logPath = join(dataDir, 'headless.log');
   const pidPath = join(dataDir, 'headless.pid');

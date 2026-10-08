@@ -60,6 +60,45 @@ the agent's own model, and summaries voiced as the agent itself
 to tune windows/budgets or opt into a different strategy type — see
 `docs/AGENT-ONBOARDING.md` for sizing guidance on long-lived agents.
 
+### Prose routing
+
+Plain assistant text (anything the model writes that is not a tool call) is
+delivered by Agent Framework according to `agent.proseRouting`:
+
+| Mode | Behavior |
+|------|----------|
+| `"locus"` (default) | Text is auto-published to the current locus — the channel that last woke the agent. Text emitted in a tool-call round is delivered live, as narration, unless that round also calls `skip_reply` or an explicit send tool. |
+| `"hybrid"` | Like `locus`, but a leading `>>>destination` envelope routes that segment elsewhere through the authorized channel resolver. |
+| `"explicit"` | Text must start with `>>#channel` / `>>@person` / `>>skip_reply`; unprefixed text is never delivered and bounces to a clipboard for a prefixed resend. |
+| `"disabled"` | Text is never auto-published. The only way anything reaches a channel is an explicit send tool (`send_message`, `channel_publish`, `reply_message`, `send_dm`, ...). Authored text stays in Chronicle and the turn-end `[delivered] nothing` receipt tells the agent how many segments were withheld. |
+
+Use `"disabled"` for agents that run multi-step tool tasks from a busy shared
+channel: in `locus` mode a stray one-line narration between two tool calls
+("checking page 2") is published to that channel as an ordinary message, and
+the only mitigation is behavioral (never narrate in tool rounds, always end
+tool-only turns with `skip_reply`). With `"disabled"` the agent replies by
+calling a send tool, and nothing else leaks.
+
+`agent.sameRoundThinkTextPolicy` (`"public"` default, or `"private"`) governs
+only text emitted **beside a `think()` call** in the same round. It does not
+cover tool-call rounds without `think()`; use `proseRouting: "disabled"` for
+that. The think policy can be inspected and switched at runtime through the
+agent's `agent_settings` tool and the web UI; `proseRouting` is fixed for the
+process lifetime.
+
+```json
+{
+  "agent": {
+    "proseRouting": "disabled",
+    "sameRoundThinkTextPolicy": "private"
+  }
+}
+```
+
+See Agent Framework's `docs/disabled-prose-routing.md`,
+`docs/explicit-prose-routing.md`, and `docs/hybrid-prose-routing.md` for the
+full semantics of each mode.
+
 ### Recipe loading
 
 | Command | Behavior |

@@ -27,7 +27,8 @@ A connectome agent is:
 
 It reaches the model through **membrane** (Anthropic-format adapter; can target a gateway via
 `ANTHROPIC_BASE_URL`). Memory is **context-manager** with the **autobiographical** strategy
-(adaptive resolution / kv-stable folding). The shell, Discord, and heartbeat tools are
+(adaptive resolution; `kv-stable` folding by default, with an opt-in cost-aware
+`kv-unified` solver — §5b). The shell, Discord, and heartbeat tools are
 **MCPL** servers spawned by the host.
 
 You don't need to understand all of it to deploy one. Follow the phases.
@@ -59,7 +60,8 @@ infra work (§4–5) in parallel once you have a name.
 1. **What should the agent be called?** (used for the Linux user, the recipe, the chronicle
    "self" participant, and the Discord bot name — they can differ, but get the canonical name).
 2. **Is there an existing conversation history to import?** If yes — what form, and where will
-   they put the file? (See §6 for formats.)
+   they put the file? (See §6 for formats. A Claude Code session transcript is a first-class
+   source — see [`claude-code-ingest.md`](./claude-code-ingest.md).)
 3. **If importing:** in that transcript, **which speaker label(s) are the agent itself?** List
    the distinct speakers and have them point at "self." Other Claude-family voices in the same
    log are *separate participants*, not self — don't merge them.
@@ -235,29 +237,43 @@ ln -sfn ../../../connectome-local/context-manager/node_modules/@animalabs/chroni
 ```jsonc
 {
   "name": "<Agent display name>",
-  "description": "<one line>",
+  "description": "<one line — where this being comes from; operator-visible>",
   "agent": {
-    "name": "<agent>",                      // = chronicle "self" participant
+    "name": "<agent>",                      // = chronicle "self" participant (byte-exact)
     "model": "<model-id>",                  // or gateway-prefixed, e.g. anthropic/claude-opus-4
     "timezone": "America/Los_Angeles",      // agent-visible wall clock only; storage stays UTC
     "systemPrompt": "<persona / or minimal>",
-    "maxTokens": 16384,                     // response cap
-    "maxStreamTokens": 180000,              // recompile trigger; keep < model window
-    "contextBudgetTokens": 160000,          // SEE §11.1 — MUST fit under (window - maxTokens)
+    "thinking": { "enabled": true, "type": "adaptive", "display": "summarized" },
+    "maxTokens": 32000,                     // response cap
+    "maxStreamTokens": 320000,              // recompile trigger; keep < model window
+    "contextBudgetTokens": 300000,          // SEE §11.1 — MUST fit under (window - maxTokens)
     "cacheTtl": "1h",                       // prompt-cache TTL; defaults to '1h', set '5m' explicitly for rapid sub-5m loops
     "strategy": {
       "type": "autobiographical",
-      "headWindowTokens": 4000,
-      "recentWindowTokens": 60000,          // recent verbatim; tune vs window (§11.1)
-      "maxMessageTokens": 10000,
       "adaptiveResolution": true,
-      "foldingStrategy": "kv-stable",       // adaptive folding (or "flat-profile")
-      "compressionModel": "<stable-model>", // SEE §11.3 — NOT a flaky/deprecated model
-      "summaryParticipant": "<agent>"
-    }
+      "foldingStrategy": "kv-stable",       // default solver; "kv-unified" is opt-in (§5b)
+      "targetChunkTokens": 3000,            // L1 chunk size; also the ingest shard size
+      "compressionSlackRatio": 0.1,
+      "mergeThreshold": 6,                  // L1→L2 / L2→L3 fan-in
+      "headWindowTokens": 4000,             // verbatim opening
+      "recentWindowTokens": 100000,         // verbatim tail; tune vs window (§11.1)
+      "maxMessageTokens": 10000,            // cap on any single rendered message
+      "compressionModel": "<same-as-agent.model>", // SEE §11.3 — stable, same voice
+      "enforceBudget": true,
+      "overBudgetGraceRatio": 0.35,
+      "maxSpeculativeL1s": 36,
+      "summaryParticipant": "<agent>",
+      "compressionRecallBudgetTokens": 40000, // prior recall pairs shown to the summarizer
+      "compressionToolProseFallback": {     // §11.9 — hoist long think/skip_reply diaries on refusal
+        "intoTool": "journal", "fromTools": ["skip_reply", "think"], "minChars": 60
+      }
+    },
+    "proseRouting": "locus",
+    "refusalHandling": { "retries": 2, "autoRewind": false, "maxRewinds": 15, "announceHumanTurns": true }
   },
   "modules": { "webui": { "port": 7343, "host": "127.0.0.1",
                           "basicAuth": { "username": "${WEBUI_USER}", "password": "${WEBUI_PASS}" } },
+               "identity": true, "history": true, "mcplAdmin": true,
                "subagents": false, "lessons": false, "retrieval": false
                /* + wake policies, workspace mounts (files/, notes/) */ },
   "mcpServers": {
@@ -267,6 +283,13 @@ ln -sfn ../../../connectome-local/context-manager/node_modules/@animalabs/chroni
   }
 }
 ```
+
+These are the values the long-running production residents converge on for a
+≥500k-window model (300k budget / 100k recent tail / 32k reply). For a **200k-window**
+model scale the three window numbers down together — e.g. `contextBudgetTokens:
+160000`, `maxStreamTokens: 180000`, `recentWindowTokens: 60000`, `maxTokens: 16384` —
+and keep everything under `strategy` as is; chunk size, merge fan-in and the
+fallback rungs are window-independent.
 
 Use `"cacheTtl": "1h"` for Connectome deployments. This is also the runtime
 default when the field is omitted. Set `"5m"` only for intentionally rapid
@@ -311,11 +334,94 @@ SLEEP_PRIVILEGED_FILE=/home/<agent>/<agent>-cm/sleep-privileged.json
 COUNT_TOKENS_MODEL=<a live model id>     # for the context-makeup endpoint (§11.4)
 ```
 
+## 5b. Folding solver — `kv-stable` (default) vs `kv-unified` (opt-in)
+
+Both solvers decide, at every compile, which summaries to present and which raw
+messages to keep verbatim so the context fits `contextBudgetTokens`.
+
+**`kv-stable`** (default, and what most residents run) keeps the presented layout as
+stable as possible between compiles so the prompt-cache prefix survives; it folds
+deeper only when forced. Robust, well understood, and the right choice unless you
+have a reason.
+
+**`kv-unified`** is a cost-aware Pareto solver: it scores candidate layouts on
+budget fit, **cache cost** (what a layout change will cost in cache writes vs reads at
+the configured prices), **continuity** (how much recent, still-referenced material
+stays verbatim) and fidelity, and picks the cheapest acceptable one. On a large-budget
+resident (600k budget / 300k tail on a 1M-window model) it has cut effective cache
+spend materially (on the order of 40 % in our accounting). It is **fail-closed**:
+selecting it without every field is a recipe error — there are no live defaults.
+
+Reference configuration in production (600k / 300k resident; tune `labelCeiling`
+and the bucket sizes to your budget):
+
+```jsonc
+"strategy": {
+  "type": "autobiographical",
+  "adaptiveResolution": true,
+  "foldingStrategy": "kv-unified",
+  "targetChunkTokens": 3000, "compressionSlackRatio": 0.1, "mergeThreshold": 6,
+  "headWindowTokens": 4000, "recentWindowTokens": 300000, "maxMessageTokens": 10000,
+  "enforceBudget": true, "overBudgetGraceRatio": 0.35, "maxSpeculativeL1s": 36,
+  "compressionRecallBudgetTokens": 40000,
+  "kvUnified": {
+    "policy": {
+      "alpha": 0.7,
+      "budgetLowRatio": 0.6, "budgetHighRatio": 0.85,
+      "budgetUnderLambda": 1000, "budgetOverLambda": 4000,
+      "cacheLambda": 1, "cacheScale": 100000,
+      "cacheReadPrice": 0.1, "cacheWritePrice": 1.25,     // $/Mtok for the agent's model
+      "continuityLambda": 1, "continuityScale": 100000,
+      "continuityRecencyHalfLifeTokens": 100000, "continuityRecencyFloor": 0.2,
+      "continuityStableHalfLife": 16, "continuityStableFloor": 0.25
+    },
+    "tokenBucketSize": 50000, "continuityBucketSize": 50000, "fidelityBucketSize": 100000,
+    "labelCeiling": 100000,
+    "adoptEpsilon": 3000,
+    "treeifyNonContiguousSummaries": false,
+    "preserveGapBearingSummaries": false,
+    "hysteresisCertificate": true
+  }
+}
+```
+
+**Preconditions — read before flipping a resident:**
+
+- **Strictly contiguous summary forest.** kv-unified's bounded solve assumes every
+  summary owns a contiguous run of leaves. A store whose summaries cross (an old
+  head-window ratchet bug produced late single-message L1s stitched into era
+  summaries) forces the solver into *buffered* mode (`preserveGapBearingSummaries`
+  / internal holes), where label propagation can run away —
+  `exact label propagation exceeded ceiling <N>` at ~1.35× `labelCeiling`, deterministic,
+  survives restart, raising the ceiling only moves the number. Run the topology
+  audit first (§11.8); repair or stay on `kv-stable`.
+- **`treeifyNonContiguousSummaries: true` is not an escape hatch** on a crossed
+  store: it solves fast but drops the deepest summaries, and the floor can land
+  above your budget (`budgetMet=false`).
+- **Rehearse cache-live, not just cold.** A cold dry-compile of a store copy never
+  passes the persisted `kvUnifiedImmutablePrefixHash`, so it never exercises the
+  cache-live solver path — the one that failed above. Rehearse on a copy with the
+  receipt hash the live host would pass.
+- **New residents: decide before first boot.** Choosing kv-unified after weeks on
+  kv-stable is a layout change (one full cache rewrite) plus the audit above.
+- `hysteresisCertificate: true` skips the full Pareto pass when the previously
+  accepted layout is provably still selected — large latency win on quiet turns;
+  `adoptEpsilon` is the score slack that lets an unchanged layout be retained.
+- Not every context-manager release carries every key; the host passes the
+  `kvUnified` object through whole, so an unknown key is a CM-side error at boot.
+  Pin the runtime and validate the recipe against it.
+
 ---
 
 ## 6. Phase 4 — Import the conversation history
 
 (Skip if starting blank.)
+
+**Sources.** Three you will meet: a ChapterX "Bridge" text dump (below), an Arc/animachat
+JSON export (same ingest, different parser), and a **Claude Code session transcript** —
+for that one follow [`claude-code-ingest.md`](./claude-code-ingest.md) end to end; it
+covers the active-branch walk, signed-thinking replay, and the `tool_result` storage
+shape that silently breaks if you get it wrong.
 
 **Get the export.** Common format is a ChapterX "Bridge" text dump: a header (`# ...`) then
 messages as `--- SpeakerName ---\n<body>` blocks. Have the user drop the file somewhere in the
@@ -337,7 +443,17 @@ node scripts/ingest-bridge.mjs <export.txt>
 
 **Watch for traps** (§11.5): rendered "💭" thinking-summary text can trip refusals on some
 models; image blocks may carry a wrong/empty `media_type`; "rolling window" re-exports overlap
-the previous one (compute the *delta* tail, don't double-import).
+the previous one (compute the *delta* tail, don't double-import). **Mirror the recipe's
+strategy in the ingest script** — `adaptiveResolution` + `targetChunkTokens` act at
+`addMessage()` time and shard oversized messages (pasted documents, huge tool results); an
+ingest without them leaves those as single unfoldable blocks.
+
+**Verify on a copy before first boot.** Compile a copy of the store with the recipe's
+strategy and *read* the rendered messages — no `[tool result unavailable]` / `[tool call
+omitted]` stubs, participants right, last message is the intended seam — and compare exact
+`count_tokens` to the estimate (a large gap means blocks are missing or doubled). Never
+open the live store with a foreign strategy config: opening chunks the frontier under that
+config (§11.8).
 
 **Pre-compress** so the first real turn isn't a cold giant compile:
 
@@ -468,15 +584,49 @@ Claude model even if the agent runs on a deprecated one — `count_tokens` on th
 wrong `media_type` (sniff magic bytes; the membrane formatter now does this); rendered
 thinking-summary text can trip refusals on some models. Always dry-run the ingest first.
 
-**11.6 — Folding floor under window pressure.** With the kv-stable solver, if summary
+**11.6 — Folding floor under window pressure.** With either solver, if summary
 *production* lags or the conversation is huge, the compile can hit a floor and throw
-`OverBudgetError`. Mitigations: let production catch up; lower `recentWindowTokens`; ensure the
-context-manager is recent enough to fold to the deepest available level. `flat-profile` is the
-robust fallback strategy.
+`OverBudgetError` (kv-unified reports `budgetMet=false` with the floor it reached). Mitigations:
+let production catch up; lower `recentWindowTokens`; ensure the context-manager is recent enough
+to fold to the deepest available level; on kv-unified, check the forest is contiguous (§5b, §11.8)
+before touching `treeifyNonContiguousSummaries`. `flat-profile` is the robust fallback strategy.
 
 **11.7 — Discord REST needs a real `User-Agent`** or Cloudflare returns 403 (`error code: 1010`)
 — this is not a permissions problem. The bot also needs **Read Message History** for backscroll
 (separate from View Channel).
+
+**11.8 — Store topology is audited at open, and opening a store mutates it.** Recent
+context-manager releases refuse to open a store whose summary ownership is crossed
+(`StoreTopologyError`, recipe `strategy.topologyPolicy` defaults to `reject`; `report` logs and
+exposes `topologyViolations` instead). Before **any** context-manager upgrade of an existing
+resident, run the audit on a **copy of the stopped store**:
+`node <cm>/dist/scripts/audit-topology.js <store-copy> --namespace agents/<agent> --json > audit.json`
+(exit 2 on violations). Repair with `scripts/repair-topology.js <store> --namespace agents/<agent>
+--mode lossless|compact|rebuild [--apply]` — on the *stopped* store, after a cold backup, then
+re-audit to zero. Two traps: (a) any `ContextManager.open` with a normal strategy config chunks
+the store's frontier under *that* config — verify only with the `auditOnly` scripts, never by
+opening a live store from a one-off script; (b) reflink/rsync copies of a *running* store read
+different state depending on when `state.bin` was last snapshotted — copy a stopped store.
+
+**11.9 — `reasoning_extraction` refusals.** Anthropic's safety classifier can end a request
+with `stop_reason: refusal` and this category; it halts residents built from dense reasoning
+transcripts and residents that keep diaries in long tool arguments. Fleet mitigations, all
+recipe-level: `refusalHandling.retries: 2` (near-threshold refusals are nondeterministic and
+refused-up-front requests are not billed); `compressionToolProseFallback` into `journal` for
+long `think` / `skip_reply` arguments; `carrierPolicy: "live-strip"` when the live window
+refuses but compression is fine; a context-manager that defers tools-less compression (a
+compression request with no `tools` declared is a deterministic input-block on some model
+families). Symptoms, triage table and the localisation method are in
+[`claude-code-ingest.md` §5](./claude-code-ingest.md#5-if-you-hit-reasoning_extraction-refusals)
+— they apply to any resident, not only Claude Code continuations. Never quote a suspected
+trigger into a channel the resident reads.
+
+**11.10 — Signed thinking is model-bound.** Replaying a transcript's signed `thinking` blocks
+works only on the model that minted them; any other model 400s. Editing the *shape* of a turn
+around a retained thinking block (split, reorder, insert before) also 400s ("thinking blocks
+cannot be modified") — a transport error the membrane retries once text-only, not a refusal.
+Newer API accounts additionally enforce preserved thinking on context edits before thinking
+blocks; expect folds to interact with this on the next model generation.
 
 ---
 
@@ -496,7 +646,15 @@ robust fallback strategy.
 - **Reach loopback webui:** `ssh -L <port>:localhost:<port> <login-user>@<box>` → `http://localhost:<port>`
 - **Live makeup:** `GET /debug/context/makeup` (basic auth) — segments + exact total tokens
 - **Compiled context:** `GET /debug/context`
-- **Per-call logs:** `data/llm-calls.<iso>.jsonl` (raw request + response + error)
+- **Per-call logs:** `data/llm-calls.<iso>.jsonl` (raw request + response + error) — rotates to a
+  new file on every restart; re-list by mtime after a bounce. Counts *attempts*; `failures.log`
+  counts *turns*.
+- **Topology audit / repair (context-manager):** `dist/scripts/audit-topology.js <store-copy>
+  --namespace agents/<agent> --json`, `dist/scripts/repair-topology.js … --mode lossless [--apply]`
+  — stopped store, cold backup first (§11.8)
+- **Health:** `GET /healthz` — per-agent `compressionQuarantine`, topology violations, head size
+- **Import guides:** [`claude-code-ingest.md`](./claude-code-ingest.md) ·
+  [`claudeai-evacuation.md`](./claudeai-evacuation.md)
 - **Identity is the user's call. The mechanics are yours. Check everything. Be kind about who you're setting up.**
 
 ---

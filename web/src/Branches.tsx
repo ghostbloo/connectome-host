@@ -10,7 +10,8 @@
  */
 
 import { createMemo, For, Show } from 'solid-js';
-import type { BranchRow } from '@conhost/web/protocol';
+import type { BranchRow, OperatorLogEntryWire } from '@conhost/web/protocol';
+import { OperatorLogList } from './Surgery';
 
 interface TreeRow {
   branch: BranchRow;
@@ -66,8 +67,19 @@ export function BranchPanel(props: {
   onCheckout(name: string): void;
   onRefresh(): void;
   onClose(): void;
+  /** Durable operator-actions record; null when the host does not keep one. */
+  operatorLog?: OperatorLogEntryWire[] | null;
+  operatorLogPath?: string;
+  operatorLogLoading?: boolean;
+  onRefreshLog?(): void;
 }) {
   const rows = createMemo(() => toTreeRows(props.branches));
+  /** Branch names created by live surgery / undo carry their purpose as a prefix. */
+  const kindOf = (name: string): string | null => {
+    const prefix = name.split('/')[0];
+    return prefix === 'rollback' || prefix === 'suppress' || prefix === 'undo' || prefix === 'undo-msgs'
+      || prefix === 'recovery' || prefix === 'surgery' || prefix === 'treatment' ? prefix : null;
+  };
 
   return (
     <div class="border-l border-neutral-800 w-96 shrink-0 bg-neutral-950 flex flex-col h-full">
@@ -122,6 +134,9 @@ export function BranchPanel(props: {
                 <Show when={b.branchPoint !== undefined}>
                   <span class="text-neutral-600 shrink-0">@{b.branchPoint}</span>
                 </Show>
+                <Show when={kindOf(b.name)}>
+                  <span class={`shrink-0 text-[9px] uppercase tracking-wider ${kindOf(b.name) === 'suppress' ? 'text-rose-400/80' : 'text-amber-400/80'}`}>{kindOf(b.name)}</span>
+                </Show>
                 <span class="ml-auto shrink-0 text-neutral-600">{fmtDate(b.created)}</span>
                 <Show when={current()}>
                   <span class="shrink-0 text-[10px] uppercase tracking-wider text-cyan-400">current</span>
@@ -142,8 +157,17 @@ export function BranchPanel(props: {
         </Show>
         <div class="mt-3 px-1 text-neutral-600 leading-relaxed">
           Branches fork from <span class="text-neutral-500">@sequence</span> in their parent.
-          /undo, /checkpoint and /branchto create them; checkout switches the live context.
+          /undo, /checkpoint, /branchto and live rollback/suppress create them; checkout switches the live context.
+          To undo a rollback or suppression, checkout its parent.
         </div>
+        <Show when={props.operatorLog}>
+          <OperatorLogList
+            entries={props.operatorLog!}
+            path={props.operatorLogPath}
+            loading={props.operatorLogLoading ?? false}
+            onRefresh={() => props.onRefreshLog?.()}
+          />
+        </Show>
       </div>
     </div>
   );

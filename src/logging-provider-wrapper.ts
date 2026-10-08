@@ -66,13 +66,13 @@ function summarizeRequest(request: ProviderRequest): Record<string, unknown> {
   };
 }
 
-function summarizeResponse(response: ProviderResponse): Record<string, unknown> {
+function summarizeResponse(response: ProviderResponse, convention: ProviderAdapter['usageCacheConvention']): Record<string, unknown> {
   const content = (response.content ?? []) as Array<{ type?: string; text?: string; name?: string }>;
   return {
     stopReason: response.stopReason
       ?? (response.raw as { stop_reason?: string } | undefined)?.stop_reason
       ?? null,
-    usage: response.usage ?? null,
+    usage: response.usage ? { ...response.usage, cacheConvention: response.usage.cacheConvention ?? convention ?? 'unknown' } : null,
     blocks: content.map((b) => ({
       type: b.type,
       ...(b.type === 'text' ? { chars: (b.text ?? '').length, text: b.text } : {}),
@@ -89,6 +89,14 @@ export class LoggingProviderAdapter implements ProviderAdapter {
     private readonly logPath: string,
   ) {
     this.name = inner.name;
+  }
+
+  get usageCacheConvention(): ProviderAdapter['usageCacheConvention'] {
+    return this.inner.usageCacheConvention;
+  }
+
+  get requiresNativeResponsesInput(): ProviderAdapter['requiresNativeResponsesInput'] {
+    return this.inner.requiresNativeResponsesInput;
   }
 
   supportsModel(modelId: string): boolean {
@@ -124,7 +132,7 @@ export class LoggingProviderAdapter implements ProviderAdapter {
       requestSummary: summarizeRequest(request),
       rawRequest: request,
       ...(response !== undefined
-        ? { response: summarizeResponse(response), rawResponse: response.raw ?? null }
+        ? { response: summarizeResponse(response, this.usageCacheConvention), rawResponse: response.raw ?? null }
         : {}),
       ...(error !== undefined
         ? { error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) }

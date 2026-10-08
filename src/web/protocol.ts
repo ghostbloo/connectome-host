@@ -88,6 +88,14 @@ export interface WelcomeMessage {
       agentModel?: string;
     };
   }>;
+  /**
+   * Optional host capabilities the SPA feature-detects before showing an
+   * affordance: 'rollback' | 'suppress' | 'quiesce' | 'media' |
+   * 'operator-log'. Absent on older hosts (nothing shown).
+   */
+  features?: string[];
+  /** Host serving state when the framework supports quiesce (see HostModeSnapshot). */
+  hostMode?: HostModeSnapshot;
   /** Cumulative session-wide token usage at connect time. */
   usage: TokenUsage;
   /** Per-agent cost breakdown for the parent process, present when the
@@ -112,8 +120,10 @@ export type MessageBlock =
   | { kind: 'redacted_thinking'; bytes: number }
   | { kind: 'tool_use'; id: string; name: string; inputJson: string; truncated?: boolean }
   | { kind: 'tool_result'; toolUseId: string; text: string; isError?: boolean; truncated?: boolean }
-  /** Image/document/audio/video or un-inflated blob_ref placeholder. */
-  | { kind: 'media'; mediaType: string };
+  /** Image/document/audio/video or un-inflated blob_ref placeholder. `ref`
+   *  is present for images the host can serve lazily at `/media/<ref>` —
+   *  bytes never ride the WebSocket. */
+  | { kind: 'media'; mediaType: string; ref?: string };
 
 export interface WelcomeMessageEntry {
   /** Stable id from the message store; clients can use this for keys. */
@@ -261,6 +271,31 @@ export interface TokenUsage {
    *  Anthropic). Optional because not every adapter / cached usage frame
    *  carries pricing data. */
   cost?: { total: number; currency: string };
+}
+
+/** `/quota` answer. `subscription: false` = pay-per-token host: keep showing
+ *  dollars and stop polling. Windows are provider-neutral, longest first. */
+export interface QuotaSnapshotData {
+  subscription: boolean;
+  provider?: string;
+  windows: Array<{
+    key: string;
+    label: string;
+    /** Percent used, 0–100. */
+    utilization: number;
+    /** Epoch ms. */
+    resetsAt?: number;
+    model?: string;
+    advisory?: boolean;
+  }>;
+  fetchedAt?: number;
+  error?: string;
+  /** Epoch ms at which the last spent window resets, else null. A spent
+   *  window is not by itself a parked agent — see `parked`. */
+  blockedUntil?: number | null;
+  /** The framework is holding an agent on the host's quota verdict. null when
+   *  the framework predates the hook and cannot say. */
+  parked?: boolean | null;
 }
 
 /** Per-agent cost slice used by the WebUI usage panel to label rows. Only
@@ -558,6 +593,69 @@ export interface InboundTriggerMessage {
   timestamp: number;
 }
 
+// ---------------------------------------------------------------------------
+// Live operator surgery (rollback / suppress), host quiesce, operator log.
+// ---------------------------------------------------------------------------
+
+/** Host serving state, projected from the framework's host-mode status. */
+export interface HostModeSnapshot {
+  /** 'serving' | 'quiescing' | 'quiesced' — or whatever the framework reports. */
+  mode: string;
+  /** Epoch millis when the current mode was entered, if known. */
+  since?: number;
+  /** Operator-supplied reason for a quiesce, if any. */
+  reason?: string;
+  /** Turns still draining while quiescing, if reported. */
+  activeTurns?: number;
+  /** Everything else the framework reported, for the detail tooltip. */
+  detail?: Record<string, unknown>;
+}
+
+export interface HostModeMessage {
+  type: 'host-mode';
+  corrId?: string;
+  hostMode: HostModeSnapshot;
+}
+
+/** Outcome of a `rollback` / `suppress` request. On success the server also
+ *  broadcasts `branch-changed` and re-welcomes every client with the new
+ *  branch's messages. */
+export interface SurgeryResultMessage {
+  type: 'surgery-result';
+  corrId?: string;
+  op: 'rollback' | 'suppress';
+  ok: boolean;
+  error?: string;
+  /** Framework refusal code when `ok` is false: 'agent-busy' means quiesce
+   *  (or wait for idle) and retry; others are input problems. */
+  code?: string;
+  agent?: string;
+  sourceBranch?: string;
+  targetBranch?: string;
+  messagesRemoved?: number;
+  lastVisible?: { participant?: string; role?: string; preview?: string } | null;
+}
+
+/** One durable operator-log record (mirrors the framework's OperatorLogEntry). */
+export interface OperatorLogEntryWire {
+  at: string;
+  kind: string;
+  agent?: string;
+  requester?: { via: string; name?: string; id?: string };
+  note?: string;
+  params?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface OperatorLogMessage {
+  type: 'operator-log';
+  corrId?: string;
+  entries: OperatorLogEntryWire[];
+  /** Where the host writes the log, when enabled. */
+  path?: string;
+}
+
 export type WebUiServerMessage =
   | WelcomeMessage
   | TraceMessage
@@ -582,6 +680,9 @@ export type WebUiServerMessage =
   | MessageAppendedMessage
   | ObserverAuthRequiredMessage
   | ObserverAckMessage
+  | HostModeMessage
+  | SurgeryResultMessage
+  | OperatorLogMessage
   | ErrorMessage;
 
 // ---------------------------------------------------------------------------
@@ -904,9 +1005,62 @@ export interface ObserverHelloMessage {
   };
 }
 
+/** Roll the live branch back so `messageId` (a store id from a wire entry)
+ *  becomes its tail. Forks first; the source branch keeps everything. */
+export interface RollbackMessage {
+  type: 'rollback';
+  messageId: string;
+  /** Agent name; defaults to the recipe's primary agent. */
+  agent?: string;
+  /** Free-text reason, recorded in the operator log. */
+  note?: string;
+  corrId?: string;
+}
+
+/** Suppress specific messages from the live context: fork at head, redact
+ *  them on the fork, switch to it. */
+export interface SuppressMessage {
+  type: 'suppress';
+  messageIds: string[];
+  agent?: string;
+  note?: string;
+  corrId?: string;
+}
+
+/** Pause serving (drain turns, hold wakes, keep maintenance hot). */
+export interface HostQuiesceMessage {
+  type: 'host-quiesce';
+  reason?: string;
+  corrId?: string;
+}
+
+/** Resume serving after a quiesce. */
+export interface HostResumeMessage {
+  type: 'host-resume';
+  corrId?: string;
+}
+
+export interface RequestHostModeMessage {
+  type: 'request-host-mode';
+  corrId?: string;
+}
+
+export interface RequestOperatorLogMessage {
+  type: 'request-operator-log';
+  /** Newest N entries (default 100, max 1000). */
+  limit?: number;
+  corrId?: string;
+}
+
 export type WebUiClientMessage =
   | UserMessageMessage
   | ObserverHelloMessage
+  | RollbackMessage
+  | SuppressMessage
+  | HostQuiesceMessage
+  | HostResumeMessage
+  | RequestHostModeMessage
+  | RequestOperatorLogMessage
   | RequestHistoryMessage
   | CommandMessage
   | RouteToChildMessage
@@ -954,6 +1108,26 @@ export function isClientMessage(value: unknown): value is WebUiClientMessage {
     case 'interrupt':
     case 'request-branches':
       return true;
+    case 'rollback':
+      return isNonEmptyString(v.messageId)
+        && (v.agent === undefined || isNonEmptyString(v.agent))
+        && (v.note === undefined || typeof v.note === 'string')
+        && (v.corrId === undefined || typeof v.corrId === 'string');
+    case 'suppress':
+      return Array.isArray(v.messageIds) && v.messageIds.length > 0
+        && v.messageIds.every((id) => isNonEmptyString(id))
+        && (v.agent === undefined || isNonEmptyString(v.agent))
+        && (v.note === undefined || typeof v.note === 'string')
+        && (v.corrId === undefined || typeof v.corrId === 'string');
+    case 'host-quiesce':
+      return (v.reason === undefined || typeof v.reason === 'string')
+        && (v.corrId === undefined || typeof v.corrId === 'string');
+    case 'host-resume':
+    case 'request-host-mode':
+      return v.corrId === undefined || typeof v.corrId === 'string';
+    case 'request-operator-log':
+      return (v.limit === undefined || (typeof v.limit === 'number' && Number.isFinite(v.limit)))
+        && (v.corrId === undefined || typeof v.corrId === 'string');
     case 'request-mcpl':
       return isOptionalScope(v.scope);
     case 'user-message':

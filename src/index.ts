@@ -33,7 +33,7 @@ import { LoggingBedrockAdapter } from './logging-bedrock-adapter.js';
 import { CodexSubscriptionAdapter } from './codex-subscription-adapter.js';
 import { CallLedger } from './call-ledger.js';
 import { SettingsModule } from './modules/settings-module.js';
-import { AgentFramework, WorkspaceModule, resolveTimeZone, type Module } from '@animalabs/agent-framework';
+import { AgentFramework, WorkspaceModule, resolveTimeZone, HistoryModule, type Module } from '@animalabs/agent-framework';
 import { resolve, join, basename } from 'node:path';
 import { appendFile, mkdir, stat, rename } from 'node:fs/promises';
 import { readFileSync, existsSync } from 'node:fs';
@@ -72,6 +72,7 @@ import { buildFrameworkStrategy, buildConversationsConfig } from './framework-st
 import { buildWorkspaceMounts } from './workspace-mounts.js';
 import { logKeepaliveEvent } from './cache-keepalive-log.js';
 import { loadExtensions } from './extensions.js';
+import { QuotaMeter, AnthropicOAuthQuotaSource, CodexQuotaSource, quotaProviderHold } from './quota-meter.js';
 
 export type { AppContext };
 
@@ -121,6 +122,9 @@ interface AppContext {
    *  layer (health snapshots) in BOTH runtimes — WebUI host and headless
    *  fleet child. Null when the provider adapter exposes no ledger. */
   callLedger: CallLedger | null;
+  /** Subscription quota windows; null on metered (pay-per-token) providers.
+   *  Its presence is what flips usage readouts from dollars to percent. */
+  quotaMeter: QuotaMeter | null;
 
   /** Stop current framework, switch to a different session, start new framework. */
   switchSession(id: string): Promise<void>;
@@ -189,6 +193,7 @@ async function createFramework(
   agentName: string,
   settingsModule: SettingsModule,
   callLedger: CallLedger | null,
+  quotaMeter: QuotaMeter | null,
 ): Promise<AgentFramework> {
   const model = resolveModel(recipe);
   const modules = recipe.modules ?? {};
@@ -264,6 +269,15 @@ async function createFramework(
     moduleInstances.push(new RetrievalModule(
       buildRetrievalModuleConfig(membrane, modules.retrieval, recipe.agent.provider),
     ));
+  }
+
+  // History browsing (native chronicle indexes + summary-backed overview).
+  // OPT-IN — not part of the standard recipe. bind() (ContextManager +
+  // ChannelRegistry) happens post-creation, below, once `framework` exists.
+  let historyModule: HistoryModule | null = null;
+  if (modules.history) {
+    historyModule = new HistoryModule();
+    moduleInstances.push(historyModule);
   }
 
   // Gate config — core AF EventGate feature.
@@ -389,6 +403,7 @@ async function createFramework(
       allowedOrigins: webuiConfig.allowedOrigins,
       observersPath,
       ...(callLedger ? { callLedger } : {}),
+      ...(quotaMeter ? { quotaMeter } : {}),
     });
     moduleInstances.push(webUiModule);
     moduleInstances.push(new ObserversModule({
@@ -511,6 +526,9 @@ agents: [agentConfig],
     mcplServers: finalServers,
     gate: gateOptions,
     timeZone,
+    // A 429 while a subscription window is spent is a quota, not a throttle:
+    // park until it resets instead of retrying into it.
+    ...(quotaMeter ? { providerHold: quotaProviderHold(quotaMeter, () => model) } : {}),
     // Client-side programmatic tool calling (code_execution) — recipe opt-in.
     ...(recipe.codeExecution ? { codeExecution: recipe.codeExecution } : {}),
     ...(conversations ? { conversations } : {}),
@@ -520,6 +538,18 @@ agents: [agentConfig],
   });
 
   // Wire post-creation hooks
+
+  // HistoryModule needs the live ContextManager (only obtainable via the
+  // agent, post-creation) and the framework's ChannelRegistry (null when no
+  // MCPL servers are configured — bind() degrades to raw-channel-id-only
+  // resolution in that case, per its own JSDoc).
+  if (historyModule) {
+    const cm = framework.getAgent(agentName)?.getContextManager();
+    if (cm) {
+      historyModule.bind(cm, framework.channels ?? undefined);
+    }
+  }
+
   // Compression-quarantine klaxon → the framework's ops-alert channel
   // (failures.log + ops:alert trace + CONNECTOME_OPS_WEBHOOK). The strategy
   // re-fires this every alarm interval for as long as ANY chunk is
@@ -889,6 +919,16 @@ async function main() {
         fastMode: recipe.agent.codex?.fastMode ?? false,
       })
     : undefined;
+  // Subscription credentials draw down utilization windows instead of being
+  // billed per token; the meter reads them out-of-band (no inference spend).
+  const quotaMeter = provider === 'anthropic' && config.authToken
+    ? new QuotaMeter(new AnthropicOAuthQuotaSource({
+        authToken: config.authToken,
+        baseURL: process.env.ANTHROPIC_BASE_URL || undefined,
+      }))
+    : codexAdapter
+      ? new QuotaMeter(new CodexQuotaSource(() => codexAdapter.readRateLimits()))
+      : null;
   // Generic OpenAI-compatible chat-completions endpoint (Ollama, vLLM, Together,
   // Groq, NanoGPT, ...). The recipe carries the endpoint (agent.baseUrl,
   // validated at load); the key is optional because local servers have none.
@@ -1107,6 +1147,10 @@ async function main() {
   const agentName = resolved.name;
 
   const membrane = new Membrane(adapter, {
+    // Recipe-level retry policy (agent.retry). Without it membrane's default
+    // gives generic retryable errors — e.g. a gateway 502 — zero retries; only
+    // 529/overloaded_error has a dedicated schedule.
+    ...(recipe.agent.retry ? { retry: recipe.agent.retry } : {}),
     formatter: provider === 'openai-responses' || provider === 'openai-codex'
       ? new OpenAIResponsesFormatter()
       : recipe.agent.formatter === 'anthropic-xml'
@@ -1127,7 +1171,7 @@ async function main() {
   });
 
   const storePath = sessionManager.getStorePath(activeSession.id);
-  const framework = await createFramework(membrane, storePath, recipe, agentName, settingsModule, callLedger);
+  const framework = await createFramework(membrane, storePath, recipe, agentName, settingsModule, callLedger, quotaMeter);
 
   // Build app context
   const app: AppContext = {
@@ -1140,6 +1184,7 @@ async function main() {
     userMessageCount: 0,
     codexAdapter,
     callLedger,
+    quotaMeter,
 
     async switchSession(id: string) {
       handleExport(this);
@@ -1150,7 +1195,7 @@ async function main() {
       // re-resolution would matter only if recipe.agent.name is absent
       // AND the user switches between imports that used different
       // --agent values; not the canonical flow.
-      this.framework = await createFramework(membrane, newStorePath, recipe, this.agentName, settingsModule, callLedger);
+      this.framework = await createFramework(membrane, newStorePath, recipe, this.agentName, settingsModule, callLedger, quotaMeter);
       this.framework.start();
       this.userMessageCount = 0;
       resetBranchState(this.branchState);

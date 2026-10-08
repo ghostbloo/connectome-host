@@ -19,8 +19,11 @@
  */
 
 import type { AgentFramework } from '@animalabs/agent-framework';
+import { NativeFormatter, AnthropicXmlFormatter } from '@animalabs/membrane';
+import type { ContentBlock, NormalizedMessage, ToolDefinition } from '@animalabs/membrane';
 import type { Recipe } from '../recipe.js';
 import type { CallLedger } from '../call-ledger.js';
+import type { QuotaMeter } from '../quota-meter.js';
 import {
   readMcplServersFile,
   DEFAULT_CONFIG_PATH,
@@ -33,6 +36,8 @@ export interface PanelAppRef {
   recipe: Recipe;
   /** Content-free recent provider-call ledger, when the host wired one. */
   callLedger?: CallLedger | null;
+  /** Subscription quota windows, when the host runs on a subscription. */
+  quotaMeter?: QuotaMeter | null;
 }
 
 /** Panel operations servable by any conhost process. Kept as a const list so
@@ -53,6 +58,8 @@ export const PANEL_OPS = [
   'context-preview',
   'context-maintenance',
   'debug-context',
+  'media',
+  'quota',
 ] as const;
 export type PanelOp = (typeof PANEL_OPS)[number];
 
@@ -126,6 +133,8 @@ export async function runPanelOp(
       }
       case 'health':
         return { ok: true, data: buildHealthSnapshot(app) };
+      case 'quota':
+        return { ok: true, data: await buildQuotaSnapshot(app) };
       case 'context-makeup':
         return { ok: true, data: await buildContextMakeup(app, resolveAgent(app, params.agent)) };
       case 'context-coverage':
@@ -138,6 +147,8 @@ export async function runPanelOp(
         return { ok: true, data: buildContextMaintenance(app) };
       case 'debug-context':
         return { ok: true, data: await buildDebugContext(app, resolveAgent(app, params.agent), params) };
+      case 'media':
+        return { ok: true, data: buildMediaBlock(app, resolveAgent(app, params.agent), params) };
       default:
         return { ok: false, error: `unknown panel op: ${op}`, status: 400 };
     }
@@ -157,6 +168,83 @@ function requireAgent(app: PanelAppRef, agentName: string): NonNullable<ReturnTy
   const agent = app.framework.getAgent(agentName);
   if (!agent) throw new PanelError(`Agent not found: ${agentName}`, 404);
   return agent;
+}
+
+// ---------------------------------------------------------------------------
+// Media — one inline image block, served lazily
+// ---------------------------------------------------------------------------
+
+interface MediaReadableCm {
+  getMessage(id: never): { content?: ReadonlyArray<unknown> } | null;
+  getMessageCount(): number;
+  getMessageWindow(
+    offset: number,
+    limit: number,
+    opts?: { resolveBlobs?: boolean },
+  ): { messages: Array<{ id?: unknown; content?: ReadonlyArray<unknown> }>; startIndex: number };
+}
+
+const MEDIA_SCAN_WINDOW = 500;
+
+/** The message's content with blobs inflated. `getMessage` normally resolves
+ *  blobs; if a facade hands back `blob_ref` placeholders, fall back to a
+ *  windowed read of just that slot (tail-first scan — media requests are
+ *  almost always for recent messages). */
+function readInflatedContent(cm: MediaReadableCm, messageId: string): ReadonlyArray<unknown> | null {
+  const direct = cm.getMessage(messageId as never);
+  if (!direct) return null;
+  const content = direct.content ?? [];
+  const hasBlobRef = content.some((b) => (b as { type?: string } | null)?.type === 'blob_ref');
+  if (!hasBlobRef) return content;
+  const total = cm.getMessageCount();
+  for (let end = total; end > 0; end -= MEDIA_SCAN_WINDOW) {
+    const start = Math.max(0, end - MEDIA_SCAN_WINDOW);
+    const win = cm.getMessageWindow(start, end - start, { resolveBlobs: false });
+    const k = win.messages.findIndex((m) => String(m.id) === messageId);
+    if (k >= 0) {
+      return cm.getMessageWindow(win.startIndex + k, 1, { resolveBlobs: true }).messages[0]?.content ?? content;
+    }
+  }
+  return content;
+}
+
+/**
+ * Resolve one inline image block by store message id + block path
+ * (`<blockIndex>` or `<blockIndex>.<innerIndex>` for an image nested in a
+ * tool_result). Returns the raw base64 + media type; the HTTP layer turns it
+ * into bytes. Only `image/*` is served — documents/audio are not viewer
+ * content.
+ */
+export function buildMediaBlock(
+  app: PanelAppRef,
+  agentName: string,
+  params: Record<string, unknown>,
+): { mediaType: string; base64: string } {
+  const agent = requireAgent(app, agentName);
+  const messageId = typeof params.messageId === 'string' ? params.messageId : '';
+  const path = typeof params.path === 'string' ? params.path : '';
+  if (!messageId || !/^\d{1,4}(\.\d{1,4})?$/.test(path)) {
+    throw new PanelError('media: messageId and block path (<n> or <n>.<m>) are required', 400);
+  }
+  const cm = agent.getContextManager() as unknown as MediaReadableCm;
+  const content = readInflatedContent(cm, messageId);
+  if (!content) throw new PanelError(`message not found on the active branch: ${messageId}`, 404);
+  const [outer, inner] = path.split('.').map(Number);
+  let block = content[outer] as Record<string, unknown> | undefined;
+  if (inner !== undefined) {
+    const nested = block?.type === 'tool_result' && Array.isArray(block.content) ? block.content : null;
+    block = nested ? (nested[inner] as Record<string, unknown> | undefined) : undefined;
+  }
+  const b = block as
+    | { type?: string; source?: { type?: string; data?: unknown; mediaType?: unknown } }
+    | undefined;
+  if (!b || b.type !== 'image') throw new PanelError(`no image block at ${path}`, 404);
+  const src = b.source;
+  if (src?.type !== 'base64' || typeof src.data !== 'string' || typeof src.mediaType !== 'string') {
+    throw new PanelError('image is not inline (reference-only or stripped)', 404);
+  }
+  if (!src.mediaType.startsWith('image/')) throw new PanelError(`not an image media type: ${src.mediaType}`, 415);
+  return { mediaType: src.mediaType, base64: src.data };
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +654,43 @@ export function applyPinRemove(app: PanelAppRef, agentName: string, pinId: strin
  * runtime settings, and (when a ledger is wired) recent provider calls.
  * Everything is read-only and cheap: no compile, no count_tokens.
  */
+/**
+ * Subscription quota windows. The request IS the poll: a client asks only
+ * while its page is visible, and the meter's refresh floor keeps any number
+ * of viewers down to one provider read per interval. `subscription: false`
+ * tells the client to keep showing dollars.
+ */
+/** Whether the framework is actually holding an agent on a host verdict. A
+ *  spent window alone parks nothing: the hold arms on a 429, and only on a
+ *  framework that has the `providerHold` hook. null = framework cannot say. */
+function hostHoldActive(app: PanelAppRef): boolean | null {
+  const fw = app.framework as unknown as { healthSnapshot?: () => { agents?: unknown } };
+  if (typeof fw.healthSnapshot !== 'function') return null;
+  try {
+    const agents = fw.healthSnapshot().agents;
+    if (!Array.isArray(agents)) return null;
+    const flags = agents.map((a) => (a as { providerAdmission?: { hostHold?: unknown } }).providerAdmission?.hostHold);
+    if (!flags.some((f) => typeof f === 'boolean')) return null;
+    return flags.some((f) => f === true);
+  } catch {
+    return null;
+  }
+}
+
+export async function buildQuotaSnapshot(app: PanelAppRef): Promise<Record<string, unknown>> {
+  if (!app.quotaMeter) return { subscription: false, windows: [] };
+  const snapshot = await app.quotaMeter.refresh();
+  return {
+    subscription: true,
+    provider: app.quotaMeter.provider,
+    windows: snapshot?.windows ?? [],
+    fetchedAt: snapshot?.fetchedAt ?? 0,
+    ...(snapshot?.error ? { error: snapshot.error } : {}),
+    blockedUntil: app.quotaMeter.blockedUntil(app.recipe.agent.model) ?? null,
+    parked: hostHoldActive(app),
+  };
+}
+
 export function buildHealthSnapshot(app: PanelAppRef): Record<string, unknown> {
   const fw = app.framework as unknown as { healthSnapshot?: () => Record<string, unknown> };
   if (typeof fw.healthSnapshot !== 'function') {
@@ -829,6 +954,70 @@ export function buildContextCoverageSnapshot(
   };
 }
 
+/** What the exact count needs from a previewed activation: the same
+ *  normalized request membrane formats for inference. */
+export interface CountablePreview {
+  system?: string | ContentBlock[];
+  messages?: NormalizedMessage[];
+  tools?: ToolDefinition[];
+  config?: { thinking?: { enabled: boolean; budgetTokens?: number } };
+}
+
+/** Anthropic count_tokens payload (everything but `model`). */
+export interface CountTokensPayload {
+  system?: unknown;
+  messages: unknown[];
+  tools?: unknown[];
+}
+
+/** The formatter surface the count needs; both prefill formatters implement it. */
+export type CountFormatter = Pick<NativeFormatter, 'buildMessages'>;
+
+/**
+ * Build the count_tokens payload by running the previewed activation through
+ * the SAME formatter path inference uses (`buildMessages`, multiuser, the
+ * agent as assistant, native tools): participant prefixes land per text block
+ * exactly as on the wire, non-text-only messages get no name block, tool
+ * pairs are normalized and same-role runs merged by the formatter itself, and
+ * every block the provider will be sent — signed `thinking` /
+ * `redacted_thinking`, `tool_use`, `tool_result`, images — is counted.
+ *
+ * The previous version flattened each message to its text blocks and sent no
+ * tool definitions: on a keep-all model (Opus >= 4.5, Sonnet >= 4.6, Fable)
+ * the replayed hidden thinking is most of the prompt, so the "exact" number
+ * read up to ~10x below what the provider bills. A hand-rolled mirror of the
+ * formatter (one standalone "Name: " block per message) still differed in
+ * prefix bytes and block framing — hence the formatter itself.
+ *
+ * `promptCaching: false` keeps cache_control markers out of the payload; they
+ * do not change the count and this request never warms a cache.
+ */
+export function buildCountTokensPayload(
+  preview: CountablePreview,
+  agentName: string,
+  formatter: CountFormatter = new NativeFormatter(),
+  toolMode: 'native' | 'xml' = 'native',
+): CountTokensPayload {
+  const built = formatter.buildMessages(preview.messages ?? [], {
+    participantMode: 'multiuser',
+    assistantParticipant: agentName,
+    tools: preview.tools,
+    toolMode,
+    thinking: preview.config?.thinking,
+    systemPrompt: preview.system,
+    promptCaching: false,
+    cacheMarkers: 'membrane-system',
+  });
+  const tools = Array.isArray(built.nativeTools) ? built.nativeTools : undefined;
+  return {
+    ...(built.systemContent !== undefined && built.systemContent !== null && built.systemContent !== ''
+      ? { system: built.systemContent }
+      : {}),
+    messages: built.messages as unknown[],
+    ...(tools && tools.length > 0 ? { tools } : {}),
+  };
+}
+
 /**
  * Best-effort mapping from an agent's configured model string to a bare
  * Anthropic API model id for /v1/messages/count_tokens. Handles membrane /
@@ -866,29 +1055,20 @@ export async function buildContextMakeup(app: PanelAppRef, agentName: string): P
   const cm = (agent as unknown as { getContextManager: () => { getRenderStats: () => unknown } }).getContextManager();
   const stats = cm.getRenderStats();
 
-  // Build an Anthropic-faithful payload for an exact count_tokens: map
-  // participants to roles (the agent's own -> assistant, others -> user
-  // with a "Name:" prefix) and merge consecutive same-role runs, mirroring
-  // what the NativeFormatter sends.
-  const textOf = (c: unknown): string =>
-    Array.isArray(c)
-      ? c.map((b) => (b && typeof b === 'object' && (b as { type?: string }).type === 'text' ? (b as { text: string }).text : '')).join('')
-      : String(c ?? '');
-  const merged: Array<{ role: 'user' | 'assistant'; text: string }> = [];
-  for (const m of ((request as { messages?: Array<{ participant?: string; role?: string; content: unknown }> }).messages ?? [])) {
-    const who = m.participant ?? m.role ?? 'user';
-    const role: 'user' | 'assistant' = who === agentName ? 'assistant' : 'user';
-    let t = textOf(m.content);
-    if (role === 'user' && who && who !== 'user') t = `${who}: ${t}`;
-    const last = merged[merged.length - 1];
-    if (last && last.role === role) last.text += '\n' + t;
-    else merged.push({ role, text: t });
-  }
-  const anthMessages = merged.filter((m) => m.text.trim().length > 0).map((m) => ({ role: m.role, content: m.text }));
-  const sysRaw = (request as { system?: unknown }).system;
-  const systemStr = Array.isArray(sysRaw)
-    ? sysRaw.map((b) => (b && typeof b === 'object' ? (b as { text?: string }).text ?? '' : String(b))).join('\n')
-    : (typeof sysRaw === 'string' ? sysRaw : undefined);
+  // Count through the formatter the agent actually runs on (prefill agents
+  // render the XML scaffold; everyone else the native shape).
+  const xml = app.recipe.agent.formatter === 'anthropic-xml';
+  const payload = buildCountTokensPayload(
+    request as unknown as CountablePreview,
+    agentName,
+    xml ? new AnthropicXmlFormatter() : new NativeFormatter(),
+    xml ? 'xml' : 'native',
+  );
+  // What the provider actually billed for the last call (fresh + cache read +
+  // cache creation): exact, free, and independent of the count below — the
+  // two disagree only when the context changed since that call.
+  const lastBilledInputTokens =
+    (agent as { lastStreamRealInputTokens?: number }).lastStreamRealInputTokens || null;
 
   let exactTotalTokens: number | null = null;
   // Count against the model the agent actually runs, not a hardcoded id:
@@ -898,7 +1078,7 @@ export async function buildContextMakeup(app: PanelAppRef, agentName: string): P
     || anthropicCountModel((agent as { model?: string }).model);
   let countSource = 'count_tokens';
   if (!countModel) {
-    return { agent: agentName, stats, exactTotalTokens, countModel, countSource: 'count_tokens_unsupported_model' };
+    return { agent: agentName, stats, exactTotalTokens, lastBilledInputTokens, countModel, countSource: 'count_tokens_unsupported_model' };
   }
   try {
     const base = (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/$/, '');
@@ -917,7 +1097,7 @@ export async function buildContextMakeup(app: PanelAppRef, agentName: string): P
         'content-type': 'application/json',
         'user-agent': 'conhost/1.0',
       },
-      body: JSON.stringify({ model: countModel, ...(systemStr ? { system: systemStr } : {}), messages: anthMessages }),
+      body: JSON.stringify({ model: countModel, ...payload }),
     });
     if (res.ok) {
       const j = (await res.json()) as { input_tokens?: number };
@@ -929,7 +1109,7 @@ export async function buildContextMakeup(app: PanelAppRef, agentName: string): P
     countSource = 'count_tokens_error';
   }
 
-  return { agent: agentName, stats, exactTotalTokens, countModel, countSource };
+  return { agent: agentName, stats, exactTotalTokens, lastBilledInputTokens, countModel, countSource };
 }
 
 /**

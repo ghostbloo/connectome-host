@@ -196,6 +196,77 @@ describe('provenance wrapping', () => {
 // Feature 2: Topic-aware chunking (boundary detection)
 // ---------------------------------------------------------------------------
 
+describe('server-attributed messages (zulip-mcp `attributed` stamp)', () => {
+  // What zulip-mcp delivers once it renders who/where/when into the body:
+  // the prefix is in the stored text, and the metadata says so exactly.
+  const HEAD = '[2026-09-14T11:42:52+03:00 id=17206924] [#qa > how to deploy?] Mykhailo Buialo: ';
+  function attributed(body: string, extra: Record<string, unknown> = {}): StoredMessage {
+    return msg('User', `${HEAD}${body}`, {
+      serverId: 'zulip',
+      channelId: 'zulip:qa',
+      topic: 'how to deploy?',
+      authorName: 'Mykhailo Buialo', // push/event origin shape: no `author` object
+      messageId: '17206924',
+      attributed: true,
+      attributionHeader: HEAD,
+      ...extra,
+    });
+  }
+
+  test('no provenance header: the body already names author, place, time and id', () => {
+    const s = makeStrategy();
+    const m = attributed('thanks, done');
+    expect(s.pub_buildHeader(m)).toBeNull();
+    const store = makeStore([m]);
+    const entry: ContextEntry = {
+      index: 0,
+      sourceMessageId: m.id,
+      sourceRelation: 'copy',
+      participant: 'User',
+      content: m.content,
+    };
+    const wrapped = s.pub_wrapProvenance(entry, store);
+    expect((wrapped.content[0] as { text: string }).text).toBe(`${HEAD}thanks, done`);
+  });
+
+  test('an unstamped MCPL message still gets the header (other servers, older zulip-mcp)', () => {
+    const s = makeStrategy();
+    const m = msg('User', 'hello', { serverId: 'zulip', channelId: 'zulip:qa', author: { name: 'bob' } });
+    expect(s.pub_buildHeader(m)).toContain('@bob');
+    // Only the boolean counts: a string is not the stamp.
+    const loose = msg('User', 'hello', { serverId: 'zulip', channelId: 'zulip:qa', attributed: 'true' });
+    expect(s.pub_buildHeader(loose)).not.toBeNull();
+  });
+
+  test('salience scans the body, not the prefix: a "?" in the topic does not make every message a question', () => {
+    const s = makeStrategy();
+    const statement = attributed('thanks, done');
+    const question = attributed('which env do I use?');
+    s.pub_updateSalience(makeStore([statement, question]));
+    const state = (s as unknown as { salientSourceIds: Set<string> }).salientSourceIds;
+    expect(state.has(statement.id)).toBe(false);
+    expect(state.has(question.id)).toBe(true);
+  });
+
+  test('the compression instruction quotes the open question without the prefix', () => {
+    const s = makeStrategy();
+    const q = attributed('where are the packet retry constants defined?');
+    s.pub_updateSalience(makeStore([q]));
+    const instr = s.pub_compressionInstruction([q], 2000);
+    expect(instr).toContain('"where are the packet retry constants defined?"');
+    expect(instr).not.toContain('id=17206924');
+  });
+
+  test('a stamp without a matching attributionHeader skips the header but scans the text as it is', () => {
+    const s = makeStrategy();
+    const m = msg('User', 'plain question?', { serverId: 'zulip', attributed: true, attributionHeader: '[not the prefix] ' });
+    expect(s.pub_buildHeader(m)).toBeNull();
+    s.pub_updateSalience(makeStore([m]));
+    const state = (s as unknown as { salientSourceIds: Set<string> }).salientSourceIds;
+    expect(state.has(m.id)).toBe(true);
+  });
+});
+
 describe('topic boundary detection', () => {
   test('returns true when adjacent messages have different topics in same channel', () => {
     const s = makeStrategy();

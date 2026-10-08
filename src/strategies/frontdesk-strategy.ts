@@ -20,7 +20,8 @@ export type FrontdeskStrategyOptions = Partial<AutobiographicalConfig> & { timeZ
  * Extends AutobiographicalStrategy with three features:
  *  1. Provenance wrapping — prepends a `[zulip · #channel · topic · @user · HH:MM · msg-id]`
  *     header to each MCPL-originated entry so the agent knows the message came from a
- *     channel and which reply path to use.
+ *     channel and which reply path to use. Skipped for a message whose server already
+ *     rendered that into the body (metadata `attributed: true`, e.g. zulip-mcp).
  *  2. Topic-aware compression — chunk boundaries close at Zulip-topic transitions
  *     (via the base chunker's `chunkBoundaryHint` seam) and the compression prompt
  *     instructs per-topic structure.
@@ -94,6 +95,12 @@ export class FrontdeskStrategy extends AutobiographicalStrategy {
     if (meta.serverId === undefined || meta.serverId === null || meta.serverId === '') {
       return null;
     }
+    // The server already put who/where/when/id into the body. A second header
+    // would repeat it, and would be the weaker of the two: on push/event the
+    // stored metadata is the event origin (`authorName`, no `author` object),
+    // and channels/incoming stores no source timestamp, so recovered replays
+    // would show receipt time.
+    if (this.isServerAttributed(msg)) return null;
 
     const parts: string[] = [];
     const serverId = String(meta.serverId);
@@ -134,6 +141,35 @@ export class FrontdeskStrategy extends AutobiographicalStrategy {
 
     if (parts.length === 0) return null;
     return `[${parts.join(' · ')}]\n`;
+  }
+
+  /** The server rendered provenance into the body itself (zulip-mcp's stamp). Strictly the boolean. */
+  protected isServerAttributed(msg: StoredMessage): boolean {
+    return ((msg.metadata ?? {}) as Record<string, unknown>).attributed === true;
+  }
+
+  /**
+   * The message's text blocks as written by the sender: a server-attributed
+   * message has its `attributionHeader` (the exact prefix the server added)
+   * removed from the block that starts with it, so text scans see the body,
+   * not the author, stream or topic names in the prefix. Without a matching
+   * prefix the text is returned as is.
+   */
+  protected bodyTextBlocks(msg: StoredMessage): string[] {
+    const meta = (msg.metadata ?? {}) as Record<string, unknown>;
+    const prefix = this.isServerAttributed(msg) && typeof meta.attributionHeader === 'string' ? meta.attributionHeader : '';
+    let stripped = prefix === '';
+    const texts: string[] = [];
+    for (const b of msg.content) {
+      if (b.type !== 'text') continue;
+      if (!stripped && b.text.startsWith(prefix)) {
+        texts.push(b.text.slice(prefix.length));
+        stripped = true;
+      } else {
+        texts.push(b.text);
+      }
+    }
+    return texts;
   }
 
   protected deriveProtocol(serverId: string, channelId: string): string {
@@ -203,7 +239,7 @@ export class FrontdeskStrategy extends AutobiographicalStrategy {
     const openQuestions: string[] = [];
     for (const m of chunk.messages) {
       if (this.salientSourceIds.has(m.id)) {
-        const text = this.extractText(m.content).trim().replace(/\s+/g, ' ');
+        const text = this.bodyTextBlocks(m).join('\n').trim().replace(/\s+/g, ' ');
         if (text) {
           openQuestions.push(text.length > 200 ? `${text.slice(0, 200)}…` : text);
         }
@@ -267,9 +303,7 @@ export class FrontdeskStrategy extends AutobiographicalStrategy {
   }
 
   protected messageIsQuestionOrMention(msg: StoredMessage): boolean {
-    for (const b of msg.content) {
-      if (b.type !== 'text') continue;
-      const text = b.text;
+    for (const text of this.bodyTextBlocks(msg)) {
       if (text.includes('?')) return true;
       if (/@\*\*[^*]+\*\*/.test(text)) return true; // Zulip-style mention
       if (/(^|\s)@[A-Za-z][\w-]*/.test(text)) return true; // Discord/Slack-style

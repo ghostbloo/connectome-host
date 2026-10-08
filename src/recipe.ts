@@ -62,6 +62,20 @@ export interface RecipeStrategy {
   compressionMergeSourceOnly?: boolean;
   /** Preserve ordinary merge retries, then use target-only on the final attempt. */
   compressionMergeSourceOnlyFallback?: boolean;
+  /**
+   * Context Manager tool-prose hoist rung (default off). On an L1 refusal, retry
+   * with long `fromTools` string arguments (e.g. a diary kept in
+   * `skip_reply.reason`) moved into calls to `intoTool` — a note-taking tool the
+   * agent really has (agent-framework `journal`). Skipped when `intoTool` is not
+   * among the declared tools.
+   */
+  compressionToolProseFallback?: {
+    intoTool: string;
+    fromTools: string[];
+    field?: string;
+    result?: string;
+    minChars?: number;
+  };
   /** Context Manager split-stitch L1 fallback rung (default off). */
   compressionSplitFallback?: boolean;
   /** Allow a single-message placeholder inside a split-stitched L1 (default off). */
@@ -75,6 +89,20 @@ export interface RecipeStrategy {
   compressionRecallBudgetTokens?: number;
   positionedRecallPairs?: boolean;
   recallHeaderTemplate?: string;
+  /**
+   * Where a summary's signed reasoning carriers (the compressor's own
+   * thinking blocks, `responseContent`) are replayed (context-manager #81).
+   * `'full'` (default): unchanged — carriers ride both the live window and
+   * mint/merge recall pairs. `'live-strip'`: carriers are omitted from the
+   * LIVE window only (whole blocks dropped, never mutated — signatures only
+   * verify byte-identical) — the agent's own compiled context renders
+   * recall pairs text-only, while compression/merge requests still carry
+   * the full signed content unconditionally (measured load-bearing there:
+   * some providers refuse a compress request without it). Useful when a
+   * provider's classifier treats a replayed foreign-request signature
+   * inside the LIVE window as reasoning extraction.
+   */
+  carrierPolicy?: 'full' | 'live-strip';
   targetChunkTokens?: number;
   mergeThreshold?: number;
   mergeMaxSourceSpanMessages?: number;
@@ -185,6 +213,17 @@ export interface RecipeAgent {
    * tools) — for migrating prefill-era bots (chapterx borgs) with their exact
    * prompting structure intact. */
   formatter?: 'native' | 'anthropic-xml';
+  /**
+   * Membrane retry policy for this agent's provider calls. Membrane's default
+   * retries generic retryable errors ZERO times — only `529`/`overloaded_error`
+   * gets its dedicated patient schedule — so a transient 5xx from a
+   * non-Anthropic gateway (a 502 "Service temporarily unavailable") kills the
+   * turn on first failure. `{ "maxRetries": 4 }` rides out such blips with
+   * exponential backoff (retryDelayMs 1000, x2, capped at maxRetryDelayMs
+   * 30000 by default). Passed to Membrane verbatim; see membrane's
+   * `RetryConfigInput` for every field.
+   */
+  retry?: import('@animalabs/membrane').MembraneConfig['retry'];
   /** Prefill scaffold user message appended after the conversation (e.g.
    * chapterx CLI-sim's "<cmd>cat untitled.txt</cmd>"). Prefill formatter only. */
   prefillUserMessage?: string;
@@ -315,6 +354,14 @@ export interface RecipeMcpServer {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /**
+   * Per-request timeout for this server's outbound JSON-RPC (tools/call,
+   * tools/list, channels/*), in milliseconds. Passed through to the
+   * framework's `McplServerConfig.requestTimeoutMs`. Raise it for tools that
+   * legitimately outlive the 60s default (image-generation gateways, long
+   * searches); `0` disables the timeout.
+   */
+  requestTimeoutMs?: number;
   /** WebSocket URL (WebSocket transport). Mutually exclusive with command. */
   url?: string;
   transport?: 'stdio' | 'websocket';
@@ -629,6 +676,19 @@ export interface RecipeModules {
    * the historical first-class surface.
    */
   mcplAdmin?: boolean | { surface?: 'tools' | 'utilities' };
+
+  /**
+   * Agent-facing history browsing (HistoryModule, agent-framework#158). OPT-IN
+   * — off by default. Adds `history--stats` / `history--extract` /
+   * `history--search` / `history--overview` tools for querying the agent's
+   * own uncompressed chronicle (native secondary indexes: stats, time/channel
+   * extraction, regex search) and for browsing already-compressed spans via
+   * existing summaries (no new LLM calls). Channel-filter arguments on all
+   * four tools accept a live or historical channel label/address, not just
+   * the raw internal channel id, when MCPL is configured (resolved via the
+   * framework's `ChannelRegistry`).
+   */
+  history?: boolean;
 
   /**
    * The agent's own archipelago-home identity (connectome docs/home-node.md):
@@ -1406,6 +1466,44 @@ export function validateRecipe(raw: unknown): Recipe {
   }
   agent.cacheTtl ??= '1h';
 
+  if (agent.retry !== undefined) {
+    const retry = agent.retry as Record<string, unknown> | null;
+    if (typeof retry !== 'object' || retry === null || Array.isArray(retry)) {
+      throw new Error(`Recipe agent.retry must be an object, got ${JSON.stringify(agent.retry)}.`);
+    }
+    const RETRY_KEYS = ['maxRetries', 'retryDelayMs', 'backoffMultiplier', 'maxRetryDelayMs'] as const;
+    // Reject unknown keys: `{ maxRetires: 4 }` would otherwise validate clean,
+    // Membrane would ignore it, and the agent would sit at zero retries —
+    // exactly the hard-down mode this knob exists to close, wearing a config
+    // that looks like it fixed it.
+    for (const key of Object.keys(retry)) {
+      if (!(RETRY_KEYS as readonly string[]).includes(key) && key !== 'overloaded') {
+        throw new Error(`Recipe agent.retry has unknown key ${JSON.stringify(key)} (known: ${RETRY_KEYS.join(', ')}, overloaded).`);
+      }
+    }
+    for (const key of ['maxRetries', 'retryDelayMs', 'backoffMultiplier', 'maxRetryDelayMs'] as const) {
+      const v = retry[key];
+      if (v !== undefined && !(typeof v === 'number' && Number.isFinite(v) && v >= 0)) {
+        throw new Error(`Recipe agent.retry.${key} must be a non-negative number, got ${JSON.stringify(v)}.`);
+      }
+    }
+    if (retry.overloaded !== undefined) {
+      const overloaded = retry.overloaded as Record<string, unknown> | null;
+      if (typeof overloaded !== 'object' || overloaded === null || Array.isArray(overloaded)) {
+        throw new Error(`Recipe agent.retry.overloaded must be an object, got ${JSON.stringify(retry.overloaded)}.`);
+      }
+      for (const key of Object.keys(overloaded)) {
+        if (!(RETRY_KEYS as readonly string[]).includes(key)) {
+          throw new Error(`Recipe agent.retry.overloaded has unknown key ${JSON.stringify(key)} (known: ${RETRY_KEYS.join(', ')}).`);
+        }
+        const v = overloaded[key];
+        if (v !== undefined && !(typeof v === 'number' && Number.isFinite(v) && v >= 0)) {
+          throw new Error(`Recipe agent.retry.overloaded.${key} must be a non-negative number, got ${JSON.stringify(v)}.`);
+        }
+      }
+    }
+  }
+
   // openai-compatible: an endpoint the host knows nothing about, so the recipe
   // must say where it is and which model to ask for. Fail at load time, not as
   // a fetch to 'undefined/chat/completions' at first inference.
@@ -1570,6 +1668,20 @@ export function validateRecipe(raw: unknown): Recipe {
     if (strategy.foldingStrategy === 'kv-unified' && strategy.type === 'passthrough') {
       throw new Error('Recipe foldingStrategy "kv-unified" requires an autobiographical or frontdesk strategy.');
     }
+    // Recipes are runtime JSON: the interface's union is not a check. Context
+    // Manager treats every value other than the exact string 'live-strip' as
+    // 'full', so a typo would silently keep replaying the reasoning carriers
+    // this key exists to strip. Fail at load, like foldingStrategy.
+    if (
+      strategy.carrierPolicy !== undefined &&
+      strategy.carrierPolicy !== 'full' &&
+      strategy.carrierPolicy !== 'live-strip'
+    ) {
+      throw new Error(
+        `Recipe agent.strategy.carrierPolicy is invalid: ${JSON.stringify(strategy.carrierPolicy)}. ` +
+        `Must be "full" or "live-strip".`,
+      );
+    }
     validateKvUnifiedConfig(strategy);
     if (
       strategy.compressionRefusalCurveFallbacks !== undefined
@@ -1602,6 +1714,40 @@ export function validateRecipe(raw: unknown): Recipe {
       if (strategy[key] !== undefined && typeof strategy[key] !== 'boolean') {
         throw new Error(`Recipe agent.strategy.${key} must be a boolean.`);
       }
+    }
+    if (strategy.compressionToolProseFallback !== undefined) {
+      // Fail loudly: CM silently treats a malformed value as "rung off", which
+      // on a resident whose compressions are refusing is an outage, not a default.
+      const hoist = strategy.compressionToolProseFallback as Record<string, unknown> | null;
+      const where = 'Recipe agent.strategy.compressionToolProseFallback';
+      if (!hoist || typeof hoist !== 'object' || Array.isArray(hoist)) {
+        throw new Error(`${where} must be an object { intoTool, fromTools, field?, result?, minChars? }.`);
+      }
+      if (typeof hoist.intoTool !== 'string' || !hoist.intoTool) {
+        throw new Error(`${where}.intoTool must be a non-empty string.`);
+      }
+      if (
+        !Array.isArray(hoist.fromTools) || hoist.fromTools.length === 0
+        || hoist.fromTools.some((name) => typeof name !== 'string' || !name)
+      ) {
+        throw new Error(`${where}.fromTools must be a non-empty array of tool names.`);
+      }
+      if ((hoist.fromTools as string[]).includes(hoist.intoTool)) {
+        throw new Error(`${where}.fromTools must not contain intoTool.`);
+      }
+      for (const key of ['field', 'result'] as const) {
+        if (hoist[key] !== undefined && (typeof hoist[key] !== 'string' || !hoist[key])) {
+          throw new Error(`${where}.${key} must be a non-empty string.`);
+        }
+      }
+      if (
+        hoist.minChars !== undefined
+        && (typeof hoist.minChars !== 'number' || !Number.isSafeInteger(hoist.minChars) || hoist.minChars < 0)
+      ) {
+        throw new Error(`${where}.minChars must be a non-negative safe integer.`);
+      }
+      const unknown = Object.keys(hoist).filter((key) => !['intoTool', 'fromTools', 'field', 'result', 'minChars'].includes(key));
+      if (unknown.length > 0) throw new Error(`${where} has unknown key(s): ${unknown.join(', ')}.`);
     }
     for (const key of ['compressionSplitMaxCallsPerChunk', 'compressionSplitMaxCallsPer10Min'] as const) {
       const value = strategy[key];
@@ -1640,6 +1786,10 @@ export function validateRecipe(raw: unknown): Recipe {
       }
       if (server.args !== undefined && !Array.isArray(server.args)) {
         throw new Error(`mcpServers.${id}.args must be an array`);
+      }
+      if (server.requestTimeoutMs !== undefined
+          && !(typeof server.requestTimeoutMs === 'number' && Number.isFinite(server.requestTimeoutMs) && server.requestTimeoutMs >= 0)) {
+        throw new Error(`mcpServers.${id}.requestTimeoutMs must be a non-negative number (ms; 0 disables)`);
       }
       if (server.source !== undefined) {
         if (typeof server.source !== 'object' || server.source === null) {

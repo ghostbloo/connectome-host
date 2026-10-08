@@ -39,6 +39,7 @@ import { type FleetModule } from './modules/fleet-module.js';
 import type { WireEvent } from './modules/fleet-types.js';
 import { parseFleetRoute } from './modules/fleet-types.js';
 import { handleCommand, resetBranchState } from './commands.js';
+import { formatQuotaReadout } from './quota-meter.js';
 
 /** Format a token count compactly: 1.2M / 3.5k / 42. */
 export function fmtTokens(n: number): string {
@@ -150,6 +151,7 @@ interface AppContext {
   recipe: import('./recipe.js').Recipe;
   branchState: import('./commands.js').BranchState;
   userMessageCount: number;
+  quotaMeter?: import('./quota-meter.js').QuotaMeter | null;
   switchSession(id: string): Promise<void>;
 }
 
@@ -164,6 +166,10 @@ interface TokenUsage {
   cacheWrite: number;
   /** Session cost estimate from the framework's UsageTracker, when priced. */
   cost?: { total: number; currency: string };
+  /** Subscription hosts only: the quota-window readout that replaces the
+   *  dollar figure (list-price dollars are fiction on a subscription).
+   *  null = subscription host with no reading yet — print neither. */
+  quota?: string | null;
 }
 
 /** One active operator alert from the ops:alert pipeline, keyed
@@ -1282,7 +1288,9 @@ export async function runTui(app: AppContext): Promise<void> {
         parts.push(`children: ${up}/${children.length} up${crashed > 0 ? ` (${crashed} crashed)` : ''}`);
       }
     }
-    if (state.tokens.cost && state.tokens.cost.total > 0) {
+    if (state.tokens.quota !== undefined) {
+      if (state.tokens.quota) parts.push(`Σ ${state.tokens.quota}`);
+    } else if (state.tokens.cost && state.tokens.cost.total > 0) {
       parts.push(`Σ $${state.tokens.cost.total.toFixed(state.tokens.cost.total < 1 ? 3 : 2)}`);
     }
     return `  ${parts.join('   ')}`;
@@ -2244,6 +2252,20 @@ export async function runTui(app: AppContext): Promise<void> {
     initTreeAggregator();
   }
 
+  // Subscription host: the status line carries quota windows, not dollars.
+  // An open TUI counts as someone looking, so the meter polls while it runs.
+  let releaseQuotaWatch: (() => void) | undefined;
+  let unsubQuota: (() => void) | undefined;
+  if (app.quotaMeter) {
+    const meter = app.quotaMeter;
+    state.tokens.quota = formatQuotaReadout(meter.getSnapshot());
+    unsubQuota = meter.onChange((snapshot) => {
+      state.tokens.quota = formatQuotaReadout(snapshot);
+      updateStatus();
+    });
+    releaseQuotaWatch = meter.watch();
+  }
+
   const pollTimer = setInterval(() => {
     // Animate spinner when researcher is active (not just on token events)
     if (state.status !== 'idle' && state.status !== 'error') {
@@ -2613,7 +2635,9 @@ export async function runTui(app: AppContext): Promise<void> {
           const session = app.sessionManager.getActiveSession();
           refreshFromStore();
           addLine(`Session: ${session?.name ?? 'unknown'}`, GRAY);
-          state.tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+          // The quota readout belongs to the credential, not the session.
+          state.tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
+            ...(state.tokens.quota !== undefined ? { quota: state.tokens.quota } : {}) };
           state.ctxTokens = 0;
           // Alerts describe the OLD session's strategy/agents; the new
           // session's own klaxons re-fire within their alarm interval if the
@@ -2688,6 +2712,8 @@ export async function runTui(app: AppContext): Promise<void> {
   // ── Cleanup ────────────────────────────────────────────────────────
 
   function cleanup() {
+    releaseQuotaWatch?.();
+    unsubQuota?.();
     cleanupPeek();
     cleanupPeekProc();
     if (fleetNoticeTimer) clearTimeout(fleetNoticeTimer);
@@ -2787,11 +2813,14 @@ function formatTokens(tokens: TokenUsage, verbose: boolean, ctxTokens = 0, ctxBu
     let s = `Σ ${fmtTokens(tokens.input)}in ${fmtTokens(tokens.output)}out`;
     if (tokens.cacheRead > 0) s += ` ${fmtTokens(tokens.cacheRead)}hit`;
     if (tokens.cacheWrite > 0) s += ` ${fmtTokens(tokens.cacheWrite)}write`;
-    if (tokens.cost && tokens.cost.total > 0) {
+    if (tokens.quota === undefined && tokens.cost && tokens.cost.total > 0) {
       s += ` $${tokens.cost.total.toFixed(tokens.cost.total < 1 ? 3 : 2)}`;
     }
     parts.push(s);
   }
+  // Outside the `total > 0` guard: how much quota is left matters most
+  // before the first call of a session.
+  if (tokens.quota) parts.push(tokens.quota);
 
   parts.push(verbose ? 'C-v:terse' : 'C-v:verbose');
   return parts.join('  ');

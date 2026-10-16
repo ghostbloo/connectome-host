@@ -32,5 +32,8 @@
   "homepage": "https://github.com/anima-research/connectome-host#readme",
   "bugs": {
     "url": "https://github.com/anima-research/connectome-host/issues"
+  },
+  "patchedDependencies": {
+    "@animalabs/agent-framework@0.7.4": "patches/@animalabs%2Fagent-framework@0.7.4.patch"
   }
 }

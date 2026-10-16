@@ -1,0 +1,32 @@
+diff --git a/src/mcpl/transport.ts b/src/mcpl/transport.ts
+index ac4934f0fdf9d4f8eb94ad7a675863acdbdf52c9..4d2521e10efd34f5bb8459aa12a50a2ebfb52f90 100644
+--- a/src/mcpl/transport.ts
++++ b/src/mcpl/transport.ts
+@@ -217,12 +217,19 @@ export class WebSocketTransport extends McplTransport {
+     const redacted = buildWebSocketUrl({ ...config, token: undefined }, null);
+     const ws = new WebSocket(url);
+ 
++    // A failed dial can emit 'error' more than once on the raw socket. Leaving
++    // no listener after the first failure turns a remote outage into an
++    // uncaught EventEmitter error and kills the whole resident process. Keep a
++    // sink on every rejected settle path; the reconnect loop owns recovery.
++    const swallowLateErrors = () => { /* settled; retry loop owns recovery */ };
++
+     return new Promise<WebSocketTransport>((resolve, reject) => {
+       let settled = false;
+       const timer = setTimeout(() => {
+         if (settled) return;
+         settled = true;
+         ws.removeAllListeners();
++        ws.on('error', swallowLateErrors);
+         try { ws.terminate(); } catch { /* already gone */ }
+         reject(new Error(`MCPL server "${config.id}" WebSocket connect timed out after ${WS_OPEN_TIMEOUT_MS}ms (${redacted})`));
+       }, WS_OPEN_TIMEOUT_MS);
+@@ -240,6 +247,7 @@ export class WebSocketTransport extends McplTransport {
+         settled = true;
+         clearTimeout(timer);
+         ws.removeAllListeners();
++        ws.on('error', swallowLateErrors);
+         try { ws.terminate(); } catch { /* already gone */ }
+         reject(new Error(`MCPL server "${config.id}" WebSocket connect failed: ${err.message} (${redacted})`));
+       });

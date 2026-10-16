@@ -17,14 +17,10 @@
 
 import {
   createCliRenderer,
-  type CliRenderer,
   BoxRenderable,
   TextRenderable,
   TextareaRenderable,
   ScrollBoxRenderable,
-  bold,
-  dim,
-  fg,
   decodePasteBytes,
   stripAnsiSequences,
 } from '@opentui/core';
@@ -35,25 +31,11 @@ import type { Membrane, NormalizedRequest } from '@animalabs/membrane';
 import type { SubagentModule, ActiveSubagent } from './modules/subagent-module.js';
 import { FleetTreeAggregator } from './state/fleet-tree-aggregator.js';
 import type { AgentNode } from './state/agent-tree-reducer.js';
-import { type FleetModule } from './modules/fleet-module.js';
+import type { FleetModule } from './modules/fleet-module.js';
 import type { WireEvent } from './modules/fleet-types.js';
 import { parseFleetRoute } from './modules/fleet-types.js';
 import { handleCommand, resetBranchState } from './commands.js';
-
-/** Format a token count compactly: 1.2M / 3.5k / 42. */
-export function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
-  return String(n);
-}
-
-/** Format elapsed seconds for humans: 48s / 5m48s / 1h02m. */
-export function fmtElapsed(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const min = Math.floor(seconds / 60);
-  if (min < 60) return `${min}m${String(seconds % 60).padStart(2, '0')}s`;
-  return `${Math.floor(min / 60)}h${String(min % 60).padStart(2, '0')}m`;
-}
+import { fmtElapsed, fmtTokens } from './ui/format.js';
 
 /**
  * How close a context is to its budget. Drives status-bar color escalation:

@@ -30,8 +30,8 @@ import type { AgentFramework } from '@animalabs/agent-framework';
 import type { ContextManager } from '@animalabs/context-manager';
 import type { Recipe } from './recipe.js';
 import { readMcplServersFile, saveMcplServers, DEFAULT_CONFIG_PATH } from './mcpl-config.js';
-import { fmtTokens } from './tui.js';
-import { type FleetModule, formatChildRow } from './modules/fleet-module.js';
+import { fmtTokens, formatChildRow } from './ui/format.js';
+import type { FleetModule } from './modules/fleet-module.js';
 
 /** Imported lazily to avoid circular deps — index.ts re-exports the type. */
 interface AppContext {

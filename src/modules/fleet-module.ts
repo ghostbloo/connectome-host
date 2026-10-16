@@ -150,7 +150,7 @@ interface LaunchInput {
   autoRestart?: boolean;
 }
 
-type ChildStatus = 'starting' | 'ready' | 'exited' | 'crashed';
+export type ChildStatus = 'starting' | 'ready' | 'exited' | 'crashed';
 
 /**
  * Subset of FleetChild that is serializable to Chronicle.  Live handles
@@ -1750,27 +1750,4 @@ export class FleetModule implements Module {
 
 function isUrlOrAbsolute(p: string): boolean {
   return p.startsWith('http://') || p.startsWith('https://') || isAbsolute(p);
-}
-
-// ---------------------------------------------------------------------------
-// Shared formatter — used by both the TUI process view and the /fleet list
-// slash command so the two surfaces can't drift into different column sets.
-// ---------------------------------------------------------------------------
-
-/** Shape a row renderer needs from a FleetChild. */
-export interface ChildRowView {
-  name: string;
-  status: ChildStatus;
-  pid: number | null;
-  startedAt: number;
-  events: ReadonlyArray<unknown>;
-}
-
-/** Format a single child as a single-line status row (no color codes). */
-export function formatChildRow(c: ChildRowView, now: number = Date.now()): string {
-  const elapsed = Math.floor((now - c.startedAt) / 1000);
-  const min = Math.floor(elapsed / 60);
-  const sec = elapsed % 60;
-  const timeStr = min > 0 ? `${min}m${sec}s` : `${sec}s`;
-  return `${c.name.padEnd(16)} ${c.status.padEnd(10)} pid=${(c.pid ?? '-').toString().padEnd(7)} ${timeStr.padEnd(6)} events=${c.events.length}`;
 }

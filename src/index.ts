@@ -28,10 +28,11 @@ import {
 } from '@animalabs/membrane';
 import { LoggingAnthropicAdapter } from './logging-adapter.js';
 import { LoggingProviderAdapter } from './logging-provider-wrapper.js';
+import { DEFAULT_LLM_CALL_LOG_CONFIG, LlmCallLog } from './llm-call-log.js';
 import { gateTelemetryHeaders, stampedTrigger, type TurnTrigger } from './gate-telemetry.js';
 import { LoggingBedrockAdapter } from './logging-bedrock-adapter.js';
 import { CodexSubscriptionAdapter } from './codex-subscription-adapter.js';
-import { CallLedger } from './call-ledger.js';
+import type { CallLedger } from './call-ledger.js';
 import { SettingsModule } from './modules/settings-module.js';
 import { AgentFramework, WorkspaceModule, resolveTimeZone, type Module } from '@animalabs/agent-framework';
 import { resolve, join, basename } from 'node:path';
@@ -871,12 +872,12 @@ async function main() {
     config.dataDir,
     `llm-calls.${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`,
   );
-  const callLedger = provider === 'anthropic'
-    ? new CallLedger({
-        dataDir: config.dataDir,
-        defaultTtl: recipe.agent.cacheTtl ?? '5m',
-      })
-    : null;
+  const llmCallConfig = { ...DEFAULT_LLM_CALL_LOG_CONFIG, ...recipe.logging?.llmCalls };
+  const callLog = (provider: string) => new LlmCallLog({ path: llmLogPath, provider, ...llmCallConfig });
+  // CallLedger (src/call-ledger.ts) is not used at runtime in this fork: its
+  // only consumer was the WebUI panel. The file stays for its cache-verdict
+  // logic; provider-call records go through LlmCallLog.
+  const callLedger: CallLedger | null = null;
   // The Codex subscription adapter owns ChatGPT login/refresh independently
   // of the API-key transports below.
   const codexAdapter = provider === 'openai-codex'
@@ -921,7 +922,7 @@ async function main() {
   const bedrockAdapter = provider === 'bedrock'
     ? new LoggingBedrockAdapter(
         { baseURL: process.env.BEDROCK_BASE_URL || undefined },
-        llmLogPath,
+        { log: callLog('bedrock') },
       )
     : undefined;
   // Mock: membrane's canned/echo adapter — the full host loop with zero
@@ -1006,23 +1007,23 @@ async function main() {
   const gateTelemetryDynamicHeaders = gateTelemetryHeaders(process.env, pendingDebtChunks, activeTurnTrigger);
 
   const adapter = provider === 'openai-responses'
-    ? new LoggingProviderAdapter(
-        new OpenAIResponsesAPIAdapter({
+    ? new LoggingProviderAdapter({
+        inner: new OpenAIResponsesAPIAdapter({
           apiKey: config.openaiApiKey!,
           baseURL: process.env.OPENAI_BASE_URL || undefined,
         }),
-        llmLogPath,
-      )
+        log: callLog('openai-responses'),
+      })
     // Codex/openrouter/openai adapters get the provider-agnostic logging
     // decorator (llm-calls.jsonl); anthropic and bedrock keep their
     // purpose-built logging classes below. The bare `codexAdapter` /
     // `openrouterAdapter` instances stay un-wrapped for auth commands and
     // dispose() — only the membrane sees the wrapper.
     : bedrockAdapter
-      ?? (mockAdapter ? new LoggingProviderAdapter(mockAdapter, llmLogPath) : undefined)
-      ?? (openrouterAdapter ? new LoggingProviderAdapter(openrouterAdapter, llmLogPath) : undefined)
-      ?? (openaiCompatibleAdapter ? new LoggingProviderAdapter(openaiCompatibleAdapter, llmLogPath) : undefined)
-      ?? (codexAdapter ? new LoggingProviderAdapter(codexAdapter, llmLogPath) : undefined)
+      ?? (mockAdapter ? new LoggingProviderAdapter({ inner: mockAdapter, log: callLog('mock') }) : undefined)
+      ?? (openrouterAdapter ? new LoggingProviderAdapter({ inner: openrouterAdapter, log: callLog('openrouter') }) : undefined)
+      ?? (openaiCompatibleAdapter ? new LoggingProviderAdapter({ inner: openaiCompatibleAdapter, log: callLog('openai-compatible') }) : undefined)
+      ?? (codexAdapter ? new LoggingProviderAdapter({ inner: codexAdapter, log: callLog('openai-codex') }) : undefined)
       ?? new LoggingAnthropicAdapter(
         {
           // Anthropic OAuth wins over API-key auth when both are present.
@@ -1067,9 +1068,10 @@ async function main() {
             onEvent: logKeepaliveEvent,
           },
         },
-        llmLogPath,
-        () => settingsModule.getReasoning(),
-        (record) => callLedger!.record(record),
+        {
+          log: callLog('anthropic'),
+          getReasoning: () => settingsModule.getReasoning(),
+        },
       );
 
   // Session management — resolved before Membrane construction so the

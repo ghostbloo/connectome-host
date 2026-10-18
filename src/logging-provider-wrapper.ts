@@ -35,10 +35,9 @@ import type {
   ProviderRequestOptions,
   StreamCallbacks,
 } from '@animalabs/membrane';
-import { appendFileSync } from 'node:fs';
+import type { LlmCallLog } from './llm-call-log.js';
 
 /** Above this many serialized bytes, drop raw bodies and keep summaries. */
-const MAX_RECORD_BYTES = 16 * 1024 * 1024;
 
 function summarizeRequest(request: ProviderRequest): Record<string, unknown> {
   const msgs = (request.messages ?? []) as Array<{ role?: string; content?: unknown }>;
@@ -84,11 +83,13 @@ function summarizeResponse(response: ProviderResponse): Record<string, unknown> 
 export class LoggingProviderAdapter implements ProviderAdapter {
   readonly name: string;
 
-  constructor(
-    private readonly inner: ProviderAdapter,
-    private readonly logPath: string,
-  ) {
-    this.name = inner.name;
+  private readonly inner: ProviderAdapter;
+  private readonly callLog: LlmCallLog;
+
+  constructor(opts: { inner: ProviderAdapter; log: LlmCallLog }) {
+    this.inner = opts.inner;
+    this.callLog = opts.log;
+    this.name = opts.inner.name;
   }
 
   supportsModel(modelId: string): boolean {
@@ -96,16 +97,7 @@ export class LoggingProviderAdapter implements ProviderAdapter {
   }
 
   private log(record: Record<string, unknown>): void {
-    try {
-      let line = JSON.stringify(record);
-      if (line.length > MAX_RECORD_BYTES) {
-        const { rawRequest: _rq, rawResponse: _rr, ...rest } = record;
-        line = JSON.stringify({ ...rest, truncated: 'raw bodies dropped (record exceeded size guard)' });
-      }
-      appendFileSync(this.logPath, line + '\n');
-    } catch {
-      // Logging must never break inference.
-    }
+    this.callLog.write(record);
   }
 
   private record(

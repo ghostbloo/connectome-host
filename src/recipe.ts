@@ -938,6 +938,19 @@ export interface Recipe {
   conversations?: RecipeConversations;
   /** Tune-out's subconscious resident (agent-framework#77). */
   subconscious?: RecipeSubconscious;
+  /** Host-side logging. */
+  logging?: RecipeLogging;
+}
+
+/** See src/llm-call-log.ts. */
+export interface RecipeLogging {
+  /** Provider-call records. Default `{ transport: 'file', contentMode: 'content' }`. */
+  llmCalls?: {
+    /** 'file': llm-calls.<iso>.jsonl in the data dir. 'stdout': one tagged JSON line per call. */
+    transport?: 'file' | 'stdout';
+    /** 'content': as before (response bodies; request bodies on refusals/errors). 'metadata_only': no conversation content. */
+    contentMode?: 'content' | 'metadata_only';
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2136,6 +2149,8 @@ export function validateRecipe(raw: unknown): Recipe {
     }
   }
 
+  if (obj.logging !== undefined) validateLogging(obj.logging);
+
   return obj as unknown as Recipe;
 }
 
@@ -2250,4 +2265,27 @@ export function parseRecipeArg(argv: string[]): { source: string | null; noRecip
   }
 
   return { source, noRecipe };
+}
+
+function validateLogging(raw: unknown): void {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Recipe logging must be an object.');
+  const logging = raw as Record<string, unknown>;
+  for (const key of Object.keys(logging)) {
+    if (key !== 'llmCalls') throw new Error(`Recipe logging has unknown field ${JSON.stringify(key)} (known: llmCalls).`);
+  }
+  const calls = logging.llmCalls;
+  if (calls === undefined) return;
+  if (!calls || typeof calls !== 'object' || Array.isArray(calls)) throw new Error('Recipe logging.llmCalls must be an object.');
+  const c = calls as Record<string, unknown>;
+  for (const key of Object.keys(c)) {
+    if (key !== 'transport' && key !== 'contentMode') {
+      throw new Error(`Recipe logging.llmCalls has unknown field ${JSON.stringify(key)} (known: transport, contentMode).`);
+    }
+  }
+  if (c.transport !== undefined && c.transport !== 'file' && c.transport !== 'stdout') {
+    throw new Error(`Recipe logging.llmCalls.transport must be "file" or "stdout" (got ${JSON.stringify(c.transport)}).`);
+  }
+  if (c.contentMode !== undefined && c.contentMode !== 'content' && c.contentMode !== 'metadata_only') {
+    throw new Error(`Recipe logging.llmCalls.contentMode must be "content" or "metadata_only" (got ${JSON.stringify(c.contentMode)}).`);
+  }
 }

@@ -16,7 +16,7 @@
   "dependencies": {
     "@animalabs/agent-framework": "^0.13.0",
     "@animalabs/chronicle": "^0.3.0",
-    "@animalabs/context-manager": "github:ghostbloo/context-manager#9daf97a52ef98469142be5b6c5a55fdd047cfb1b",
+    "@animalabs/context-manager": "^0.8.0",
     "@animalabs/membrane": "^0.5.82",
     "@opentui/core": "^0.1.82"
   },
@@ -32,11 +32,5 @@
   "homepage": "https://github.com/anima-research/connectome-host#readme",
   "bugs": {
     "url": "https://github.com/anima-research/connectome-host/issues"
-  },
-  "overrides": {
-    "@animalabs/context-manager": "github:ghostbloo/context-manager#9daf97a52ef98469142be5b6c5a55fdd047cfb1b"
-  },
-  "trustedDependencies": [
-    "@animalabs/context-manager"
-  ]
+  }
 }

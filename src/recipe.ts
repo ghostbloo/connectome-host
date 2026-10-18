@@ -44,21 +44,10 @@ export interface RecipeStrategy {
   // for what the recipe loader accepts under `agent.strategy`.
   enforceBudget?: boolean;
   maxSpeculativeL1s?: number;
-  /** In-band L1 preamble: undefined uses Context Manager's default, a string
-   * replaces it, and false omits the message entirely. */
-  compressionMarker?: string | false;
   /** Number of coverage-equivalent recall curves to try after the canonical
    * autobiographical compression request is explicitly refused. Zero disables
    * fallback while retaining the canonical attempt. */
   compressionRefusalCurveFallbacks?: number;
-  /** Number of identical normalized-request retries after a compression refusal. */
-  compressionIdenticalRefusalRetries?: number;
-  /** Disable non-identical compression shape fallbacks (tool/no-tools, carrier stripping, plain prose). */
-  compressionShapeFallbacks?: boolean;
-  /** Replay captured summary reasoning carriers inside compression recall pairs. */
-  mintCarrierPolicy?: 'full' | 'strip';
-  /** Ordinary first-person L1 instruction override; `{targetTokens}` is substituted. */
-  compressionInstruction?: string;
   /** Complete provider-request admission ceiling for compression fallbacks,
    * including the output reserve. */
   compressionContextBudgetTokens?: number;
@@ -77,10 +66,6 @@ export interface RecipeStrategy {
   compressionSplitFallback?: boolean;
   /** Allow a single-message placeholder inside a split-stitched L1 (default off). */
   compressionSplitPlaceholder?: boolean;
-  /** Provider refusal categories eligible for provisional classifier-gap records (default none). */
-  compressionClassifierGapCategories?: string[];
-  /** Split-stitch depth floor: 1 = halves, 2 = halves then quarters; unset = legacy. */
-  compressionSplitMaxDepth?: number;
   /** Split-stitch: max sub-calls per chunk (default 40). */
   compressionSplitMaxCallsPerChunk?: number;
   /** Split-stitch: max sub-calls per strategy instance per 10-minute in-memory window (default 80). */
@@ -1597,32 +1582,6 @@ export function validateRecipe(raw: unknown): Recipe {
       throw new Error('Recipe agent.strategy.compressionRefusalCurveFallbacks must be a non-negative safe integer.');
     }
     if (
-      strategy.compressionIdenticalRefusalRetries !== undefined
-      && (
-        typeof strategy.compressionIdenticalRefusalRetries !== 'number'
-        || !Number.isSafeInteger(strategy.compressionIdenticalRefusalRetries)
-        || strategy.compressionIdenticalRefusalRetries < 0
-      )
-    ) {
-      throw new Error('Recipe agent.strategy.compressionIdenticalRefusalRetries must be a non-negative safe integer.');
-    }
-    if (
-      strategy.compressionInstruction !== undefined
-      && (typeof strategy.compressionInstruction !== 'string' || strategy.compressionInstruction.length === 0)
-    ) {
-      throw new Error('Recipe agent.strategy.compressionInstruction must be a non-empty string.');
-    }
-    if (strategy.compressionShapeFallbacks !== undefined && typeof strategy.compressionShapeFallbacks !== 'boolean') {
-      throw new Error('Recipe agent.strategy.compressionShapeFallbacks must be boolean.');
-    }
-    if (
-      strategy.mintCarrierPolicy !== undefined
-      && strategy.mintCarrierPolicy !== 'full'
-      && strategy.mintCarrierPolicy !== 'strip'
-    ) {
-      throw new Error('Recipe agent.strategy.mintCarrierPolicy must be "full" or "strip".');
-    }
-    if (
       strategy.compressionContextBudgetTokens !== undefined
       && (
         typeof strategy.compressionContextBudgetTokens !== 'number'
@@ -1631,13 +1590,6 @@ export function validateRecipe(raw: unknown): Recipe {
       )
     ) {
       throw new Error('Recipe agent.strategy.compressionContextBudgetTokens must be a positive safe integer.');
-    }
-    if (
-      strategy.compressionMarker !== undefined
-      && strategy.compressionMarker !== false
-      && (typeof strategy.compressionMarker !== 'string' || strategy.compressionMarker.length === 0)
-    ) {
-      throw new Error('Recipe agent.strategy.compressionMarker must be false or a non-empty string.');
     }
     for (const key of [
       'compressionSourceOnly',
@@ -1651,16 +1603,7 @@ export function validateRecipe(raw: unknown): Recipe {
         throw new Error(`Recipe agent.strategy.${key} must be a boolean.`);
       }
     }
-    if (
-      strategy.compressionClassifierGapCategories !== undefined
-      && (
-        !Array.isArray(strategy.compressionClassifierGapCategories)
-        || !strategy.compressionClassifierGapCategories.every((c: unknown) => typeof c === 'string' && c.length > 0)
-      )
-    ) {
-      throw new Error('Recipe agent.strategy.compressionClassifierGapCategories must be an array of non-empty strings.');
-    }
-    for (const key of ['compressionSplitMaxDepth', 'compressionSplitMaxCallsPerChunk', 'compressionSplitMaxCallsPer10Min'] as const) {
+    for (const key of ['compressionSplitMaxCallsPerChunk', 'compressionSplitMaxCallsPer10Min'] as const) {
       const value = strategy[key];
       if (value !== undefined && (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0)) {
         throw new Error(`Recipe agent.strategy.${key} must be a positive safe integer.`);

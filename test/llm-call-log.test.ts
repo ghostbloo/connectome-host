@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LlmCallLog, toMetadataOnly } from '../src/llm-call-log.js';
+import { LlmCallLog, toMetadataOnly } from '../src/logging/llm-calls.js';
 import { validateRecipe } from '../src/recipe.js';
 
 const SECRET = 'the-actual-conversation-text';

@@ -6,7 +6,7 @@
  */
 import { test, expect } from 'bun:test';
 import { LoggingAnthropicAdapter } from '../src/logging-adapter.js';
-import { LlmCallLog } from '../src/llm-call-log.js';
+import { LlmCallLog } from '../src/logging/llm-calls.js';
 
 function makeAdapter() {
   const adapter = new LoggingAnthropicAdapter({ apiKey: 'test-key' }, { log: new LlmCallLog({ path: '/tmp/llm-test.jsonl', provider: 'test' }), getReasoning: () => ({ enabled: false, budgetTokens: 0 }) });

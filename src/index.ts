@@ -28,15 +28,14 @@ import {
 } from '@animalabs/membrane';
 import { LoggingAnthropicAdapter } from './logging-adapter.js';
 import { LoggingProviderAdapter } from './logging-provider-wrapper.js';
-import { DEFAULT_LLM_CALL_LOG_CONFIG, LlmCallLog } from './llm-call-log.js';
+import { DEFAULT_LLM_CALL_LOG_CONFIG, LlmCallLog } from './logging/llm-calls.js';
 import { gateTelemetryHeaders, stampedTrigger, type TurnTrigger } from './gate-telemetry.js';
 import { LoggingBedrockAdapter } from './logging-bedrock-adapter.js';
 import { CodexSubscriptionAdapter } from './codex-subscription-adapter.js';
 import type { CallLedger } from './call-ledger.js';
 import { SettingsModule } from './modules/settings-module.js';
 import { AgentFramework, WorkspaceModule, resolveTimeZone, type Module } from '@animalabs/agent-framework';
-import { resolve, join, basename } from 'node:path';
-import { appendFile, mkdir, stat, rename } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { SubagentModule } from './modules/subagent-module.js';
 import { LessonsModule } from './modules/lessons-module.js';
@@ -73,6 +72,7 @@ import { buildFrameworkStrategy, buildConversationsConfig } from './framework-st
 import { buildWorkspaceMounts } from './workspace-mounts.js';
 import { logKeepaliveEvent } from './cache-keepalive-log.js';
 import { loadExtensions } from './extensions.js';
+import { defaultMcplLogConfig, setupMcplStderrLog } from './logging/mcpl.js';
 
 export type { AppContext };
 
@@ -646,66 +646,6 @@ function setupSynesthete(app: AppContext): void {
 }
 
 // ---------------------------------------------------------------------------
-// MCPL subprocess stderr log — receipts for "why did that MCPL server break"
-// ---------------------------------------------------------------------------
-
-const MCPL_STDERR_LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB; rolls to .1 on overflow.
-
-/** Render an mcpl:server-* connection-lifecycle trace as a log line, or null
- *  for trace types this sink doesn't record. Lifecycle lines are prefixed
- *  `[host]` to stand apart from the server's own stderr output. */
-function formatMcplLifecycleLine(event: { type: string } & Record<string, unknown>): string | null {
-  switch (event.type) {
-    case 'mcpl:server-stderr':
-      return String(event.line);
-    case 'mcpl:server-connect-failed':
-      return `[host] connect failed (attempt ${event.attempt}, ${event.willRetry ? 'will retry' : 'NO RETRY — server unavailable until restart'}): ${event.error}`;
-    case 'mcpl:server-reconnected':
-      return `[host] reconnected after ${event.attempts} attempt(s)`;
-    case 'mcpl:server-closed':
-      return `[host] connection closed (code=${event.code}, signal=${event.signal}${event.willReconnect ? ', reconnect scheduled' : ''})`;
-    case 'mcpl:server-error':
-      return `[host] connection error: ${event.error}`;
-    default:
-      return null;
-  }
-}
-
-function setupMcplStderrLog(app: AppContext, storePath: string): void {
-  const dir = join(storePath, 'mcpl-stderr');
-  // Best-effort directory creation — if it fails, per-write attempts will too,
-  // and we'll swallow those quietly. We don't want logging to be load-bearing.
-  void mkdir(dir, { recursive: true }).catch(() => {});
-
-  app.framework.onTrace((event) => {
-    const e = event as unknown as { type: string; serverId?: string; timestamp: number } & Record<string, unknown>;
-    if (typeof e.serverId !== 'string') return;
-    const line = formatMcplLifecycleLine(e);
-    if (line === null) return;
-    const iso = new Date(e.timestamp).toISOString();
-    // basename guards against a misconfigured serverId like "../foo" escaping dir.
-    const path = join(dir, `${basename(e.serverId)}.log`);
-    const entry = `${iso} ${line}\n`;
-    void rotateIfNeeded(path, entry.length)
-      .then(() => appendFile(path, entry))
-      .catch(() => {
-        // If logging itself fails, don't cascade.
-      });
-  });
-}
-
-async function rotateIfNeeded(path: string, incomingBytes: number): Promise<void> {
-  try {
-    const s = await stat(path);
-    if (s.size + incomingBytes > MCPL_STDERR_LOG_MAX_BYTES) {
-      await rename(path, `${path}.1`);
-    }
-  } catch {
-    // No existing file (or stat failed) — nothing to rotate.
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Piped/headless mode (--no-tui or non-TTY stdin)
 // ---------------------------------------------------------------------------
 
@@ -812,26 +752,6 @@ async function runPiped(app: AppContext) {
   await new Promise<void>(r => rl.on('close', r));
   console.log('\nShutting down...');
   await app.framework.stop();
-}
-
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
-
-/** Count non-empty lines in a file. Returns 0 if the file doesn't exist. */
-function countLines(path: string): number {
-  if (!existsSync(path)) return 0;
-  try {
-    const buf = readFileSync(path, 'utf8');
-    if (buf.length === 0) return 0;
-    let n = 0;
-    for (let i = 0; i < buf.length; i++) if (buf.charCodeAt(i) === 10) n++;
-    // If the last byte isn't a newline, there's a partial trailing line that counts too.
-    if (buf.charCodeAt(buf.length - 1) !== 10) n++;
-    return n;
-  } catch {
-    return 0;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,7 +1073,10 @@ async function main() {
       this.userMessageCount = 0;
       resetBranchState(this.branchState);
       setupSynesthete(this);
-      setupMcplStderrLog(this, newStorePath);
+      setupMcplStderrLog(this, {
+        ...defaultMcplLogConfig({ storePath: newStorePath }),
+        ...(recipe.logging?.mcpl ?? {}),
+      });
       getWebUiModule(this.framework)?.setApp(this);
     },
   };
@@ -1184,7 +1107,10 @@ async function main() {
 
   framework.start();
   setupSynesthete(app);
-  setupMcplStderrLog(app, storePath);
+  setupMcplStderrLog(app, {
+    ...defaultMcplLogConfig({ storePath }),
+    ...(recipe.logging?.mcpl ?? {}),
+  });
   getWebUiModule(framework)?.setApp(app);
 
   try {

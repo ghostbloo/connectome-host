@@ -26,7 +26,7 @@ import type {
   ProviderRequestOptions,
   StreamCallbacks,
 } from '@animalabs/membrane';
-import type { LlmCallLog } from './llm-call-log.js';
+import type { LlmCallLog } from './logging/llm-calls.js';
 import { summarizeCacheControls, type ProviderCallRecord } from './call-ledger.js';
 
 /** Live read of the current reasoning setting. The host wires this to

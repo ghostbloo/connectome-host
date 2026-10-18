@@ -47,6 +47,16 @@ export interface SettingsState {
   reasoning: ReasoningSettings;
 }
 
+export interface SettingsModuleDefaults {
+  reasoning?: Partial<ReasoningSettings>;
+}
+
+export interface RecipeThinkingSettings {
+  enabled: boolean;
+  budgetTokens?: number;
+  display?: 'summarized' | 'omitted';
+}
+
 const DEFAULTS: SettingsState = {
   reasoning: { enabled: false, budgetTokens: 8192, display: 'summarized' },
 };
@@ -55,16 +65,40 @@ export class SettingsModule implements Module {
   readonly name = 'settings';
 
   private ctx: ModuleContext | null = null;
-  private state: SettingsState = clone(DEFAULTS);
+  private readonly defaults: SettingsState;
+  private state: SettingsState;
+
+  constructor(defaults: SettingsModuleDefaults = {}) {
+    this.defaults = {
+      reasoning: { ...DEFAULTS.reasoning, ...(defaults.reasoning ?? {}) },
+    };
+    this.state = clone(this.defaults);
+  }
+
+  /** Build the runtime baseline elected by the recipe. Persisted live settings
+   *  still win in start(), and reset returns to this baseline. */
+  static fromRecipeThinking(thinking?: RecipeThinkingSettings): SettingsModule {
+    return new SettingsModule({
+      reasoning: {
+        enabled: thinking?.enabled ?? DEFAULTS.reasoning.enabled,
+        budgetTokens: thinking?.budgetTokens ?? DEFAULTS.reasoning.budgetTokens,
+        display: thinking?.display ?? DEFAULTS.reasoning.display,
+      },
+    });
+  }
 
   async start(ctx: ModuleContext): Promise<void> {
     this.ctx = ctx;
+    // A SettingsModule instance survives session switches. Begin every start
+    // from the recipe baseline so an unsaved session cannot inherit the prior
+    // session's live toggle, then overlay any state saved for this session.
+    this.state = clone(this.defaults);
     const saved = ctx.getState<Partial<SettingsState>>();
     if (saved) {
-      // Shallow-merge each domain so future-added fields fall back to defaults
-      // for state persisted by older versions.
+      // Shallow-merge each domain so future-added fields fall back to the
+      // recipe-elected baseline for state persisted by older versions.
       this.state = {
-        reasoning: { ...DEFAULTS.reasoning, ...(saved.reasoning ?? {}) },
+        reasoning: { ...this.defaults.reasoning, ...(saved.reasoning ?? {}) },
       };
     }
   }
@@ -159,13 +193,13 @@ export class SettingsModule implements Module {
       reset: (_agentName, keys) => {
         const all = !keys || keys.length === 0;
         if (all || keys?.includes('reasoning_enabled')) {
-          this.state.reasoning.enabled = DEFAULTS.reasoning.enabled;
+          this.state.reasoning.enabled = this.defaults.reasoning.enabled;
         }
         if (all || keys?.includes('reasoning_budget_tokens')) {
-          this.state.reasoning.budgetTokens = DEFAULTS.reasoning.budgetTokens;
+          this.state.reasoning.budgetTokens = this.defaults.reasoning.budgetTokens;
         }
         if (all || keys?.includes('reasoning_display')) {
-          this.state.reasoning.display = DEFAULTS.reasoning.display;
+          this.state.reasoning.display = this.defaults.reasoning.display;
         }
         this.ctx?.setState(this.state);
         return this.reasoningSettingsView();

@@ -32,7 +32,7 @@ import { DEFAULT_LLM_CALL_LOG_CONFIG, LlmCallLog } from './llm-call-log.js';
 import { gateTelemetryHeaders, stampedTrigger, type TurnTrigger } from './gate-telemetry.js';
 import { LoggingBedrockAdapter } from './logging-bedrock-adapter.js';
 import { CodexSubscriptionAdapter } from './codex-subscription-adapter.js';
-import { CallLedger } from './call-ledger.js';
+import type { CallLedger } from './call-ledger.js';
 import { SettingsModule } from './modules/settings-module.js';
 import { AgentFramework, WorkspaceModule, resolveTimeZone, type Module } from '@animalabs/agent-framework';
 import { resolve, join, basename } from 'node:path';
@@ -873,15 +873,11 @@ async function main() {
     `llm-calls.${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`,
   );
   const llmCallConfig = { ...DEFAULT_LLM_CALL_LOG_CONFIG, ...recipe.logging?.llmCalls };
-  const callLog = (adapter: string) => new LlmCallLog({ path: llmLogPath, adapter, ...llmCallConfig });
-  const callLedger = provider === 'anthropic'
-    ? new CallLedger({
-        dataDir: config.dataDir,
-        defaultTtl: recipe.agent.cacheTtl ?? '5m',
-        // Startup replay reads the llm-calls files; with stdout there are none.
-        hydrate: llmCallConfig.transport === 'file',
-      })
-    : null;
+  const callLog = (provider: string) => new LlmCallLog({ path: llmLogPath, provider, ...llmCallConfig });
+  // CallLedger (src/call-ledger.ts) is not used at runtime in this fork: its
+  // only consumer was the WebUI panel. The file stays for its cache-verdict
+  // logic; provider-call records go through LlmCallLog.
+  const callLedger: CallLedger | null = null;
   // The Codex subscription adapter owns ChatGPT login/refresh independently
   // of the API-key transports below.
   const codexAdapter = provider === 'openai-codex'
@@ -926,7 +922,7 @@ async function main() {
   const bedrockAdapter = provider === 'bedrock'
     ? new LoggingBedrockAdapter(
         { baseURL: process.env.BEDROCK_BASE_URL || undefined },
-        { log: callLog('LoggingBedrockAdapter') },
+        { log: callLog('bedrock') },
       )
     : undefined;
   // Mock: membrane's canned/echo adapter — the full host loop with zero
@@ -1016,7 +1012,7 @@ async function main() {
           apiKey: config.openaiApiKey!,
           baseURL: process.env.OPENAI_BASE_URL || undefined,
         }),
-        log: callLog('LoggingProviderAdapter'),
+        log: callLog('openai-responses'),
       })
     // Codex/openrouter/openai adapters get the provider-agnostic logging
     // decorator (llm-calls.jsonl); anthropic and bedrock keep their
@@ -1024,10 +1020,10 @@ async function main() {
     // `openrouterAdapter` instances stay un-wrapped for auth commands and
     // dispose() — only the membrane sees the wrapper.
     : bedrockAdapter
-      ?? (mockAdapter ? new LoggingProviderAdapter({ inner: mockAdapter, log: callLog('LoggingProviderAdapter') }) : undefined)
-      ?? (openrouterAdapter ? new LoggingProviderAdapter({ inner: openrouterAdapter, log: callLog('LoggingProviderAdapter') }) : undefined)
-      ?? (openaiCompatibleAdapter ? new LoggingProviderAdapter({ inner: openaiCompatibleAdapter, log: callLog('LoggingProviderAdapter') }) : undefined)
-      ?? (codexAdapter ? new LoggingProviderAdapter({ inner: codexAdapter, log: callLog('LoggingProviderAdapter') }) : undefined)
+      ?? (mockAdapter ? new LoggingProviderAdapter({ inner: mockAdapter, log: callLog('mock') }) : undefined)
+      ?? (openrouterAdapter ? new LoggingProviderAdapter({ inner: openrouterAdapter, log: callLog('openrouter') }) : undefined)
+      ?? (openaiCompatibleAdapter ? new LoggingProviderAdapter({ inner: openaiCompatibleAdapter, log: callLog('openai-compatible') }) : undefined)
+      ?? (codexAdapter ? new LoggingProviderAdapter({ inner: codexAdapter, log: callLog('openai-codex') }) : undefined)
       ?? new LoggingAnthropicAdapter(
         {
           // Anthropic OAuth wins over API-key auth when both are present.
@@ -1073,9 +1069,8 @@ async function main() {
           },
         },
         {
-          log: callLog('LoggingAnthropicAdapter'),
+          log: callLog('anthropic'),
           getReasoning: () => settingsModule.getReasoning(),
-          onCall: (record) => callLedger!.record(record),
         },
       );
 

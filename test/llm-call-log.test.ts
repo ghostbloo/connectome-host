@@ -46,12 +46,12 @@ describe('llm call log', () => {
     const dir = mkdtempSync(join(tmpdir(), 'llmlog-'));
     const path = join(dir, 'llm-calls.x.jsonl');
     try {
-      const log = new LlmCallLog({ path, adapter: 'LoggingAnthropicAdapter', transport: 'stdout', contentMode: 'metadata_only' });
+      const log = new LlmCallLog({ path, provider: 'anthropic', transport: 'stdout', contentMode: 'metadata_only' });
       const lines = captureStdout(() => log.write(record()));
       expect(lines).toHaveLength(1);
       const parsed = JSON.parse(lines[0]!);
       expect(parsed.logger).toBe('llm-calls');
-      expect(parsed.adapter).toBe('LoggingAnthropicAdapter');
+      expect(parsed.provider).toBe('anthropic');
       expect(parsed.rawResponse.usage.output_tokens).toBe(5);
       expect(lines[0]).not.toContain(SECRET);
       expect(() => readFileSync(path)).toThrow();
@@ -64,7 +64,7 @@ describe('llm call log', () => {
     const dir = mkdtempSync(join(tmpdir(), 'llmlog-'));
     const path = join(dir, 'llm-calls.x.jsonl');
     try {
-      const log = new LlmCallLog({ path, adapter: 'x' });
+      const log = new LlmCallLog({ path, provider: 'x' });
       expect(log.transport).toBe('file');
       expect(log.keepsContent).toBe(true);
       const lines = captureStdout(() => log.write(record()));

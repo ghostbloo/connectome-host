@@ -9,7 +9,7 @@ import { LoggingAnthropicAdapter } from '../src/logging-adapter.js';
 import { LlmCallLog } from '../src/llm-call-log.js';
 
 function makeAdapter() {
-  const adapter = new LoggingAnthropicAdapter({ apiKey: 'test-key' }, { log: new LlmCallLog({ path: '/tmp/llm-test.jsonl', adapter: 'test' }), getReasoning: () => ({ enabled: false, budgetTokens: 0 }) });
+  const adapter = new LoggingAnthropicAdapter({ apiKey: 'test-key' }, { log: new LlmCallLog({ path: '/tmp/llm-test.jsonl', provider: 'test' }), getReasoning: () => ({ enabled: false, budgetTokens: 0 }) });
   const fired: unknown[] = [];
   adapter.onRefusal = (info) => fired.push(info);
   const observe = (kind: 'complete' | 'stream', stopReason?: string, category?: string) =>

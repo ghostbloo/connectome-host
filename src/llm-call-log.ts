@@ -4,7 +4,7 @@
  *   transport   'file'   — append JSONL to `llm-calls.<iso>.jsonl` in the data
  *                          dir (the original behaviour).
  *               'stdout' — one JSON line per call via console.log, tagged
- *                          `logger: 'llm-calls'`, for a log collector to pick
+ *                          `logger: 'llm-calls'` and the recipe `provider`, for a log collector to pick
  *                          up (headless mode captures stdout into
  *                          headless.log). Nothing is written next to the store.
  *   contentMode 'content'       — records as before: response bodies, and
@@ -75,11 +75,11 @@ export class LlmCallLog {
   readonly transport: LlmCallTransport;
   readonly contentMode: LlmCallContentMode;
   private readonly path: string;
-  private readonly adapter: string;
+  private readonly provider: string;
 
-  constructor(opts: { path: string; adapter: string } & Partial<LlmCallLogConfig>) {
+  constructor(opts: { path: string; provider: string } & Partial<LlmCallLogConfig>) {
     this.path = opts.path;
-    this.adapter = opts.adapter;
+    this.provider = opts.provider;
     this.transport = opts.transport ?? DEFAULT_LLM_CALL_LOG_CONFIG.transport;
     this.contentMode = opts.contentMode ?? DEFAULT_LLM_CALL_LOG_CONFIG.contentMode;
   }
@@ -99,7 +99,7 @@ export class LlmCallLog {
         line = JSON.stringify({ ...rest, truncated: 'raw bodies dropped (record exceeded size guard)' });
       }
       if (this.transport === 'stdout') {
-        console.log(JSON.stringify({ logger: 'llm-calls', adapter: this.adapter, ...JSON.parse(line) }));
+        console.log(JSON.stringify({ logger: 'llm-calls', provider: this.provider, ...JSON.parse(line) }));
         return;
       }
       appendFileSync(this.path, line + '\n');

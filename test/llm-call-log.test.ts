@@ -22,11 +22,11 @@ const record = () => ({
 });
 
 function captureStdout(fn: () => void): string[] {
-  const lines: string[] = [];
-  const orig = console.log;
-  console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
-  try { fn(); } finally { console.log = orig; }
-  return lines;
+  const chunks: string[] = [];
+  const orig = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => { chunks.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  try { fn(); } finally { process.stdout.write = orig; }
+  return chunks.join('').split('\n').filter(Boolean);
 }
 
 describe('llm call log', () => {

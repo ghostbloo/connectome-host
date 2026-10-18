@@ -3,10 +3,12 @@
  *
  *   transport   'file'   — append JSONL to `llm-calls.<iso>.jsonl` in the data
  *                          dir (the original behaviour).
- *               'stdout' — one JSON line per call via console.log, tagged
+ *               'stdout' — one JSON line per call on process.stdout, tagged
  *                          `logger: 'llm-calls'` and the recipe `provider`, for a log collector to pick
- *                          up (headless mode captures stdout into
- *                          headless.log). Nothing is written next to the store.
+ *                          up. Written with process.stdout.write, not
+ *                          console.log: headless mode captures stdout into
+ *                          headless.log by replacing process.stdout.write,
+ *                          and under bun console.log bypasses that. Nothing is written next to the store.
  *   contentMode 'content'       — records as before: response bodies, and
  *                                 request bodies on refusals/errors (all of
  *                                 them with LLM_CALLS_FULL_PAYLOADS=1).
@@ -99,7 +101,7 @@ export class LlmCallLog {
         line = JSON.stringify({ ...rest, truncated: 'raw bodies dropped (record exceeded size guard)' });
       }
       if (this.transport === 'stdout') {
-        console.log(JSON.stringify({ logger: 'llm-calls', provider: this.provider, ...JSON.parse(line) }));
+        process.stdout.write(`${JSON.stringify({ logger: 'llm-calls', provider: this.provider, ...JSON.parse(line) })}\n`);
         return;
       }
       appendFileSync(this.path, line + '\n');

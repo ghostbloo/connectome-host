@@ -28,6 +28,7 @@ import {
 } from '@animalabs/membrane';
 import { LoggingAnthropicAdapter } from './logging-adapter.js';
 import { LoggingProviderAdapter } from './logging-provider-wrapper.js';
+import { DEFAULT_LLM_CALL_LOG_CONFIG, LlmCallLog } from './llm-call-log.js';
 import { gateTelemetryHeaders, stampedTrigger, type TurnTrigger } from './gate-telemetry.js';
 import { LoggingBedrockAdapter } from './logging-bedrock-adapter.js';
 import { CodexSubscriptionAdapter } from './codex-subscription-adapter.js';
@@ -871,10 +872,14 @@ async function main() {
     config.dataDir,
     `llm-calls.${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`,
   );
+  const llmCallConfig = { ...DEFAULT_LLM_CALL_LOG_CONFIG, ...recipe.logging?.llmCalls };
+  const callLog = (adapter: string) => new LlmCallLog({ path: llmLogPath, adapter, ...llmCallConfig });
   const callLedger = provider === 'anthropic'
     ? new CallLedger({
         dataDir: config.dataDir,
         defaultTtl: recipe.agent.cacheTtl ?? '5m',
+        // Startup replay reads the llm-calls files; with stdout there are none.
+        hydrate: llmCallConfig.transport === 'file',
       })
     : null;
   // The Codex subscription adapter owns ChatGPT login/refresh independently
@@ -921,7 +926,7 @@ async function main() {
   const bedrockAdapter = provider === 'bedrock'
     ? new LoggingBedrockAdapter(
         { baseURL: process.env.BEDROCK_BASE_URL || undefined },
-        llmLogPath,
+        { log: callLog('LoggingBedrockAdapter') },
       )
     : undefined;
   // Mock: membrane's canned/echo adapter — the full host loop with zero
@@ -1006,23 +1011,23 @@ async function main() {
   const gateTelemetryDynamicHeaders = gateTelemetryHeaders(process.env, pendingDebtChunks, activeTurnTrigger);
 
   const adapter = provider === 'openai-responses'
-    ? new LoggingProviderAdapter(
-        new OpenAIResponsesAPIAdapter({
+    ? new LoggingProviderAdapter({
+        inner: new OpenAIResponsesAPIAdapter({
           apiKey: config.openaiApiKey!,
           baseURL: process.env.OPENAI_BASE_URL || undefined,
         }),
-        llmLogPath,
-      )
+        log: callLog('LoggingProviderAdapter'),
+      })
     // Codex/openrouter/openai adapters get the provider-agnostic logging
     // decorator (llm-calls.jsonl); anthropic and bedrock keep their
     // purpose-built logging classes below. The bare `codexAdapter` /
     // `openrouterAdapter` instances stay un-wrapped for auth commands and
     // dispose() — only the membrane sees the wrapper.
     : bedrockAdapter
-      ?? (mockAdapter ? new LoggingProviderAdapter(mockAdapter, llmLogPath) : undefined)
-      ?? (openrouterAdapter ? new LoggingProviderAdapter(openrouterAdapter, llmLogPath) : undefined)
-      ?? (openaiCompatibleAdapter ? new LoggingProviderAdapter(openaiCompatibleAdapter, llmLogPath) : undefined)
-      ?? (codexAdapter ? new LoggingProviderAdapter(codexAdapter, llmLogPath) : undefined)
+      ?? (mockAdapter ? new LoggingProviderAdapter({ inner: mockAdapter, log: callLog('LoggingProviderAdapter') }) : undefined)
+      ?? (openrouterAdapter ? new LoggingProviderAdapter({ inner: openrouterAdapter, log: callLog('LoggingProviderAdapter') }) : undefined)
+      ?? (openaiCompatibleAdapter ? new LoggingProviderAdapter({ inner: openaiCompatibleAdapter, log: callLog('LoggingProviderAdapter') }) : undefined)
+      ?? (codexAdapter ? new LoggingProviderAdapter({ inner: codexAdapter, log: callLog('LoggingProviderAdapter') }) : undefined)
       ?? new LoggingAnthropicAdapter(
         {
           // Anthropic OAuth wins over API-key auth when both are present.
@@ -1067,9 +1072,11 @@ async function main() {
             onEvent: logKeepaliveEvent,
           },
         },
-        llmLogPath,
-        () => settingsModule.getReasoning(),
-        (record) => callLedger!.record(record),
+        {
+          log: callLog('LoggingAnthropicAdapter'),
+          getReasoning: () => settingsModule.getReasoning(),
+          onCall: (record) => callLedger!.record(record),
+        },
       );
 
   // Session management — resolved before Membrane construction so the

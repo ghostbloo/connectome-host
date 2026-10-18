@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { LoggingAnthropicAdapter } from '../src/logging-adapter.js';
+import { LlmCallLog } from '../src/llm-call-log.js';
 import type { ProviderCallRecord } from '../src/call-ledger.js';
 import type { ProviderRequest, ProviderResponse } from '@animalabs/membrane';
 
@@ -22,7 +23,7 @@ const disabled = () => ({ enabled: false, budgetTokens: 0 });
 
 describe('LoggingAnthropicAdapter.withReasoning', () => {
   test('injects adaptive thinking into request.extra when reasoning enabled', () => {
-    const adapter = new LoggingAnthropicAdapter({ apiKey: 'test' }, '/dev/null', enabled);
+    const adapter = new LoggingAnthropicAdapter({ apiKey: 'test' }, { log: new LlmCallLog({ path: '/dev/null', adapter: 'test' }), getReasoning: enabled });
     const out = (adapter as unknown as { withReasoning(r: ProviderRequest): ProviderRequest })
       .withReasoning(baseRequest);
     expect((out.extra as Record<string, { type?: string }> | undefined)?.thinking?.type).toBe('adaptive');
@@ -31,7 +32,7 @@ describe('LoggingAnthropicAdapter.withReasoning', () => {
   });
 
   test('preserves pre-existing extra keys', () => {
-    const adapter = new LoggingAnthropicAdapter({ apiKey: 'test' }, '/dev/null', enabled);
+    const adapter = new LoggingAnthropicAdapter({ apiKey: 'test' }, { log: new LlmCallLog({ path: '/dev/null', adapter: 'test' }), getReasoning: enabled });
     const req = { ...baseRequest, extra: { normalizedMessages: 'keep-me' } } as ProviderRequest;
     const out = (adapter as unknown as { withReasoning(r: ProviderRequest): ProviderRequest })
       .withReasoning(req);
@@ -41,14 +42,14 @@ describe('LoggingAnthropicAdapter.withReasoning', () => {
   });
 
   test('no-op (same reference) when reasoning disabled', () => {
-    const adapter = new LoggingAnthropicAdapter({ apiKey: 'test' }, '/dev/null', disabled);
+    const adapter = new LoggingAnthropicAdapter({ apiKey: 'test' }, { log: new LlmCallLog({ path: '/dev/null', adapter: 'test' }), getReasoning: disabled });
     const out = (adapter as unknown as { withReasoning(r: ProviderRequest): ProviderRequest })
       .withReasoning(baseRequest);
     expect(out).toBe(baseRequest);
   });
 
   test('no-op when no reasoning getter is wired', () => {
-    const adapter = new LoggingAnthropicAdapter({ apiKey: 'test' }, '/dev/null');
+    const adapter = new LoggingAnthropicAdapter({ apiKey: 'test' }, { log: new LlmCallLog({ path: '/dev/null', adapter: 'test' }) });
     const out = (adapter as unknown as { withReasoning(r: ProviderRequest): ProviderRequest })
       .withReasoning(baseRequest);
     expect(out).toBe(baseRequest);
@@ -56,7 +57,7 @@ describe('LoggingAnthropicAdapter.withReasoning', () => {
 });
 
 describe('LoggingAnthropicAdapter request logging', () => {
-  const adapter = new LoggingAnthropicAdapter({ apiKey: 'test' }, '/dev/null');
+  const adapter = new LoggingAnthropicAdapter({ apiKey: 'test' }, { log: new LlmCallLog({ path: '/dev/null', adapter: 'test' }) });
   const internals = adapter as unknown as {
     requestSummary(r: ProviderRequest, raw?: unknown): Record<string, unknown>;
     refusalRawRequest(r: ProviderResponse, raw: unknown): unknown;
@@ -104,7 +105,7 @@ describe('LoggingAnthropicAdapter request logging', () => {
     const prev = process.env.LLM_CALLS_FULL_PAYLOADS;
     process.env.LLM_CALLS_FULL_PAYLOADS = '1';
     try {
-      const full = new LoggingAnthropicAdapter({ apiKey: 'test' }, '/dev/null');
+      const full = new LoggingAnthropicAdapter({ apiKey: 'test' }, { log: new LlmCallLog({ path: '/dev/null', adapter: 'test' }) });
       const fi = full as unknown as typeof internals;
       const rawRequest = { messages: ['forensic context'] };
       const success = { raw: { stop_reason: 'end_turn' } } as unknown as ProviderResponse;
@@ -122,7 +123,7 @@ describe('LoggingAnthropicAdapter request logging', () => {
     try {
       for (const off of ['', '0', 'false', 'FALSE']) {
         process.env.LLM_CALLS_FULL_PAYLOADS = off;
-        const a = new LoggingAnthropicAdapter({ apiKey: 'test' }, '/dev/null');
+        const a = new LoggingAnthropicAdapter({ apiKey: 'test' }, { log: new LlmCallLog({ path: '/dev/null', adapter: 'test' }) });
         const ai = a as unknown as typeof internals;
         const success = { raw: { stop_reason: 'end_turn' } } as unknown as ProviderResponse;
         expect(ai.refusalRawRequest(success, { m: 1 })).toBeUndefined();
@@ -137,9 +138,7 @@ describe('LoggingAnthropicAdapter request logging', () => {
     const calls: ProviderCallRecord[] = [];
     const observed = new LoggingAnthropicAdapter(
       { apiKey: 'test' },
-      '/dev/null',
-      undefined,
-      (call) => calls.push(call),
+      { log: new LlmCallLog({ path: '/dev/null', adapter: 'test' }), onCall: (call) => calls.push(call) },
     ) as unknown as {
       observeCall(
         kind: 'complete' | 'stream',

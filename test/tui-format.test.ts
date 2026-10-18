@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { ctxSeverity, fmtElapsed, pickTopAlert, sliceViewport } from '../src/tui.js';
+import { ctxSeverity, pickTopAlert, sliceViewport } from '../src/tui.js';
+import { fmtElapsed } from '../src/ui/format.js';
 
 describe('fmtElapsed', () => {
   test('seconds under a minute stay bare', () => {

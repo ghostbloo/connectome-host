@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { LoggingAnthropicAdapter } from '../src/logging-adapter.js';
-import { LlmCallLog } from '../src/llm-call-log.js';
+import { LlmCallLog } from '../src/logging/llm-calls.js';
 import type { ProviderCallRecord } from '../src/call-ledger.js';
 import type { ProviderRequest, ProviderResponse } from '@animalabs/membrane';
 

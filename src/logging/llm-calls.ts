@@ -6,9 +6,9 @@
  *               'stdout' — one JSON line per call on process.stdout, tagged
  *                          `logger: 'llm-calls'` and the recipe `provider`, for a log collector to pick
  *                          up. Written with process.stdout.write, not
- *                          console.log: headless mode captures stdout into
- *                          headless.log by replacing process.stdout.write,
- *                          and under bun console.log bypasses that. Nothing is written next to the store.
+ *                          console.log: in headless 'file' mode stdout is
+ *                          captured by replacing process.stdout.write, which
+ *                          bun's console.log bypasses.
  *   contentMode 'content'       — records as before: response bodies, and
  *                                 request bodies on refusals/errors (all of
  *                                 them with LLM_CALLS_FULL_PAYLOADS=1).
@@ -25,7 +25,17 @@ export type LlmCallTransport = 'file' | 'stdout';
 export type LlmCallContentMode = 'content' | 'metadata_only';
 
 export interface LlmCallLogConfig {
+  /**
+   * Where logs go:
+   * - 'file': llm-calls.<iso>.jsonl in the data dir.
+   * - 'stdout': one tagged JSON line per call.
+   */
   transport: LlmCallTransport;
+  /**
+   * What gets logged:
+   * - 'content': response bodies; request bodies on refusals/errors
+   * - 'metadata_only': no conversation content.
+   */
   contentMode: LlmCallContentMode;
 }
 

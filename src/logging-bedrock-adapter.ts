@@ -20,7 +20,7 @@ import type {
   ProviderRequestOptions,
   StreamCallbacks,
 } from '@animalabs/membrane';
-import type { LlmCallLog } from './llm-call-log.js';
+import type { LlmCallLog } from './logging/llm-calls.js';
 
 type BedrockConfig = ConstructorParameters<typeof BedrockAdapter>[0];
 

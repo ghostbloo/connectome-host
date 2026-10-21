@@ -20,7 +20,6 @@ import type {
   ToolCall,
   ToolResult,
 } from '@animalabs/agent-framework';
-import type { ContextInjection } from '@animalabs/context-manager';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';

@@ -12,7 +12,7 @@
 
 import { join, resolve } from 'node:path';
 import type { MountConfig } from '@animalabs/agent-framework';
-import type { RecipeModules, RecipeWorkspaceMount } from './recipe.js';
+import type { RecipeModules, RecipeWorkspaceMount } from '../recipe.js';
 
 /**
  * Build the mount list for a recipe's workspace declaration.

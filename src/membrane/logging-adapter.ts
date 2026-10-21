@@ -26,8 +26,8 @@ import type {
   ProviderRequestOptions,
   StreamCallbacks,
 } from '@animalabs/membrane';
-import type { LlmCallLog } from './logging/llm-calls.js';
-import { summarizeCacheControls, type ProviderCallRecord } from './call-ledger.js';
+import type { LlmCallLog } from '../logging/llm-calls.js';
+import { summarizeCacheControls } from './caching.js';
 
 /** Live read of the current reasoning setting. The host wires this to
  *  `SettingsModule.getReasoning()` so toggles via the `agent_settings` tool's
@@ -37,7 +37,6 @@ export type ReasoningGetter = () => {
   budgetTokens: number;
   display?: 'summarized' | 'omitted';
 };
-export type ProviderCallObserver = (record: ProviderCallRecord) => void;
 
 /** Exact first-system-block identity Anthropic requires on subscription
  *  (sk-ant-oat…) OAuth traffic. Verified 2026-07-09: any other first block —
@@ -53,16 +52,15 @@ function envFlag(value: string | undefined): boolean {
 }
 
 export interface LoggingAnthropicAdapterOptions {
+  config: ConstructorParameters<typeof AnthropicAdapter>[0],
   /** Where call records go (file or stdout) and how much content they keep. */
   log: LlmCallLog;
   getReasoning?: ReasoningGetter;
-  onCall?: ProviderCallObserver;
 }
 
 export class LoggingAnthropicAdapter extends AnthropicAdapter {
   private readonly callLog: LlmCallLog;
   private readonly getReasoning?: ReasoningGetter;
-  private readonly onCall?: ProviderCallObserver;
   /** True when authenticated with an OAuth/Bearer token instead of an API
    *  key; requests then need the identity block prepended (see above). */
   private readonly oauthMode: boolean;
@@ -75,15 +73,11 @@ export class LoggingAnthropicAdapter extends AnthropicAdapter {
    *  captured per-call for the summary); pair with llm-calls rotation. */
   private readonly fullPayloads: boolean = envFlag(process.env.LLM_CALLS_FULL_PAYLOADS);
 
-  constructor(
-    config: ConstructorParameters<typeof AnthropicAdapter>[0],
-    opts: LoggingAnthropicAdapterOptions,
-  ) {
-    super(config);
+  constructor(opts: LoggingAnthropicAdapterOptions & {  }) {
+    super(opts.config);
     this.callLog = opts.log;
     this.getReasoning = opts.getReasoning;
-    this.onCall = opts.onCall;
-    this.oauthMode = Boolean(config?.authToken);
+    this.oauthMode = Boolean(opts.config?.authToken);
   }
 
   /** Under OAuth subscription auth, prepend the required identity block to the
@@ -197,39 +191,6 @@ export class LoggingAnthropicAdapter extends AnthropicAdapter {
           inputTokens: response?.usage.inputTokens ?? 0,
         });
       } catch { /* observers never affect provider traffic */ }
-    }
-    if (!this.onCall) return;
-    const cache = summarizeCacheControls(rawRequest);
-    const raw = (response as { raw?: Record<string, unknown> } | undefined)?.raw;
-    const rawUsage = raw?.usage as Record<string, unknown> | undefined;
-    const cacheCreation = rawUsage?.cache_creation as Record<string, unknown> | undefined;
-    const finite = (value: unknown): number | undefined =>
-      typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-    const text = (value: unknown): string | undefined =>
-      typeof value === 'string' && value.length > 0 ? value : undefined;
-    try {
-      this.onCall({
-        timestamp,
-        kind,
-        durationMs,
-        model: request.model,
-        messages: request.messages.length,
-        inputTokens: response?.usage.inputTokens ?? 0,
-        outputTokens: response?.usage.outputTokens ?? 0,
-        cacheReadTokens: response?.usage.cacheReadTokens ?? 0,
-        cacheWriteTokens: response?.usage.cacheCreationTokens ?? 0,
-        cacheWrite5mTokens: finite(cacheCreation?.ephemeral_5m_input_tokens),
-        cacheWrite1hTokens: finite(cacheCreation?.ephemeral_1h_input_tokens),
-        cacheWriteBucketsAuthoritative: cacheCreation !== undefined,
-        inferenceGeo: text(rawUsage?.inference_geo) ?? text(raw?.inference_geo),
-        serviceTier: text(rawUsage?.service_tier) ?? text(raw?.service_tier),
-        cacheBreakpoints: cache.count,
-        cacheTtls: cache.ttls,
-        stopReason: response?.stopReason,
-        error: error instanceof Error ? error.message : error ? String(error) : undefined,
-      });
-    } catch {
-      // A dashboard observer is never allowed to affect provider traffic.
     }
   }
 

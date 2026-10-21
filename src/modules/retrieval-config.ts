@@ -1,6 +1,6 @@
 import type { Membrane } from '@animalabs/membrane';
-import type { RecipeAgent, RecipeModules } from './recipe.js';
-import type { RetrievalModuleConfig } from './modules/retrieval-module.js';
+import type { RecipeAgent, RecipeModules } from '../recipe.js';
+import type { RetrievalModuleConfig } from './retrieval-module.js';
 
 type RetrievalRecipeConfig = Exclude<RecipeModules['retrieval'], boolean | undefined>;
 

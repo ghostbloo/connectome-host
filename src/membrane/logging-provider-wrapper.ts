@@ -35,7 +35,7 @@ import type {
   ProviderRequestOptions,
   StreamCallbacks,
 } from '@animalabs/membrane';
-import type { LlmCallLog } from './logging/llm-calls.js';
+import type { LlmCallLog } from '../logging/llm-calls.js';
 
 /** Above this many serialized bytes, drop raw bodies and keep summaries. */
 
@@ -152,6 +152,12 @@ export class LoggingProviderAdapter implements ProviderAdapter {
     } catch (error) {
       this.record('stream', request, started, undefined, error);
       throw error;
+    }
+  }
+
+  dispose() {
+    if ('dispose' in this.inner && typeof this.inner.dispose === 'function') {
+      this.inner.dispose();
     }
   }
 }

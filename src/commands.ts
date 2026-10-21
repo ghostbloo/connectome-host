@@ -28,27 +28,9 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { AgentFramework } from '@animalabs/agent-framework';
 import type { ContextManager } from '@animalabs/context-manager';
-import type { Recipe } from './recipe.js';
-import { readMcplServersFile, saveMcplServers, DEFAULT_CONFIG_PATH } from './mcpl-config.js';
-import { fmtTokens, formatChildRow } from './ui/format.js';
-import type { FleetModule } from './modules/fleet-module.js';
-
-/** Imported lazily to avoid circular deps — index.ts re-exports the type. */
-interface AppContext {
-  framework: AgentFramework;
-  /** Resolved main-agent name (see index.ts resolveAgentName). Optional
-   *  because some callers (tui/webui refs) don't thread it; /puppet falls
-   *  back to the first registered agent, same as getAgentCM. */
-  agentName?: string;
-  sessionManager: import('./session-manager.js').SessionManager;
-  recipe: Recipe;
-  branchState: BranchState;
-  codexAdapter?: {
-    isFastMode(): boolean;
-    setFastMode(enabled: boolean): void;
-  };
-  switchSession(id: string): Promise<void>;
-}
+import { readMcplServersFile, saveMcplServers, DEFAULT_CONFIG_PATH } from './mcp/mcpl-config.js';
+import { fmtTokens } from './ui/format.js';
+import type { AppContext } from './context.js';
 
 export type Line = { text: string; style?: 'user' | 'agent' | 'tool' | 'system' };
 
@@ -199,14 +181,10 @@ export function handleCommand(command: string, app: AppContext): CommandResult {
           { text: '  /session               Show current session', style: 'system' },
           { text: '  /session list          List all sessions', style: 'system' },
           { text: '  /session new [name]    Create new session', style: 'system' },
-          { text: '  /session switch <name or id> Switch to session', style: 'system' },
           { text: '  /session rename <name> Rename current session', style: 'system' },
-          { text: '  /session delete <name or id> --confirm  Delete a session (irreversible)', style: 'system' },
           { text: '  /recipe                Show current recipe info', style: 'system' },
           { text: '  /newtopic [context]    Reset head window (auto-summarize if empty)', style: 'system' },
           { text: '  /usage                 Show session token usage and costs', style: 'system' },
-          { text: '  /fleet                 Show / peek / stop / restart cross-process children', style: 'system' },
-          { text: '                         (subcommands: list | status [name] | view | peek <name> | stop <name> | restart <name>)', style: 'system' },
         ],
       };
 
@@ -285,9 +263,6 @@ export function handleCommand(command: string, app: AppContext): CommandResult {
     case 'usage':
       return handleUsage(app);
 
-    case 'fleet':
-      return handleFleet(app, args);
-
     default:
       return {
         lines: [{ text: `Unknown command: /${cmd}. Type /help.`, style: 'system' }],
@@ -343,19 +318,8 @@ function handleSession(app: AppContext, args: string[]): CommandResult {
     case 'list':
     case 'ls':
       return handleSessionList(app);
-    case 'new':
-    case 'create':
-      return handleSessionNew(app, args.slice(1).join(' ') || undefined);
-    case 'switch':
-    case 'sw':
-      // Rest-of-line, matching rename: session names may contain spaces, and
-      // a session renamed to a multi-word name must stay reachable by name.
-      return handleSessionSwitch(app, args.slice(1).join(' ') || undefined);
     case 'rename':
       return handleSessionRename(app, args.slice(1).join(' ') || undefined);
-    case 'delete':
-    case 'rm':
-      return handleSessionDelete(app, args.slice(1));
     default:
       return { lines: [{ text: `Unknown /session subcommand: ${sub}. Try /session list.`, style: 'system' }] };
   }
@@ -404,39 +368,6 @@ function handleSessionList(app: AppContext): CommandResult {
   return { lines };
 }
 
-function handleSessionNew(app: AppContext, name?: string): CommandResult {
-  const session = app.sessionManager.createSession(name);
-  resetBranchState(app.branchState);
-
-  return {
-    lines: [{ text: `Switching to new session: ${session.name} [${session.id}]...`, style: 'system' }],
-    switchToSessionId: session.id,
-  };
-}
-
-function handleSessionSwitch(app: AppContext, nameOrId?: string): CommandResult {
-  if (!nameOrId) {
-    return { lines: [{ text: 'Usage: /session switch <name or id>', style: 'system' }] };
-  }
-
-  const session = app.sessionManager.findSession(nameOrId);
-  if (!session) {
-    return { lines: [{ text: `Session "${nameOrId}" not found. Use /session list.`, style: 'system' }] };
-  }
-
-  const active = app.sessionManager.getActiveSession();
-  if (active && session.id === active.id) {
-    return { lines: [{ text: `Already on session "${session.name}".`, style: 'system' }] };
-  }
-
-  resetBranchState(app.branchState);
-
-  return {
-    lines: [{ text: `Switching to session: ${session.name} [${session.id}]...`, style: 'system' }],
-    switchToSessionId: session.id,
-  };
-}
-
 function handleSessionRename(app: AppContext, name?: string): CommandResult {
   if (!name) {
     return { lines: [{ text: 'Usage: /session rename <name>', style: 'system' }] };
@@ -449,42 +380,6 @@ function handleSessionRename(app: AppContext, name?: string): CommandResult {
 
   app.sessionManager.renameSession(session.id, name);
   return { lines: [{ text: `Session renamed to "${name}".`, style: 'system' }] };
-}
-
-function handleSessionDelete(app: AppContext, args: string[]): CommandResult {
-  // Deletion is irreversible, so it takes an explicit second step: the bare
-  // command shows exactly what matched (name + id + message count) and asks
-  // for --confirm. This also defuses the truncated-name amplifier: a typo'd
-  // or partial name can match a DIFFERENT session, and without the echo the
-  // wrong one died silently.
-  const confirmed = args[args.length - 1] === '--confirm';
-  const nameOrId = (confirmed ? args.slice(0, -1) : args).join(' ') || undefined;
-
-  if (!nameOrId) {
-    return { lines: [{ text: 'Usage: /session delete <name or id> [--confirm]', style: 'system' }] };
-  }
-
-  const session = app.sessionManager.findSession(nameOrId);
-  if (!session) {
-    return { lines: [{ text: `Session "${nameOrId}" not found.`, style: 'system' }] };
-  }
-
-  if (!confirmed) {
-    const msgs = session.messageCount !== undefined ? `, ${session.messageCount} msgs` : '';
-    return {
-      lines: [
-        { text: `Will delete session "${session.name}" [${session.id}]${msgs} — irreversible.`, style: 'system' },
-        { text: `To proceed: /session delete ${session.id} --confirm`, style: 'system' },
-      ],
-    };
-  }
-
-  try {
-    app.sessionManager.deleteSession(session.id);
-    return { lines: [{ text: `Deleted session "${session.name}" [${session.id}].`, style: 'system' }] };
-  } catch (err) {
-    return { lines: [{ text: `Delete failed: ${err instanceof Error ? err.message : err}`, style: 'system' }] };
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1283,126 +1178,4 @@ function handleMcpEnv(id: string | undefined, pairs: string[]): CommandResult {
 
   saveMcplServers(DEFAULT_CONFIG_PATH, servers);
   return { lines: [{ text: `Set ${set.join(', ')} on "${id}". Restart to apply.`, style: 'system' }] };
-}
-
-// ---------------------------------------------------------------------------
-// /fleet subcommands
-// ---------------------------------------------------------------------------
-
-function getFleet(app: AppContext): FleetModule | null {
-  const mod = app.framework.getAllModules().find((m) => m.name === 'fleet');
-  return (mod as FleetModule | undefined) ?? null;
-}
-
-function handleFleet(app: AppContext, args: string[]): CommandResult {
-  const fleet = getFleet(app);
-  if (!fleet) {
-    return {
-      lines: [
-        { text: 'Fleet module is not enabled in this recipe.', style: 'system' },
-        { text: 'Add `"modules": { "fleet": true }` to your recipe JSON to enable.', style: 'system' },
-      ],
-    };
-  }
-
-  const sub = args[0];
-  switch (sub) {
-    case undefined:
-    case 'list':
-    case 'ls':
-      return handleFleetList(fleet);
-    case 'status':
-      return handleFleetStatus(fleet, args[1]);
-    case 'view':
-      return { lines: [{ text: 'Opening fleet view. Press Tab to return.', style: 'system' }], switchToFleetView: true };
-    case 'peek':
-      if (!args[1]) return { lines: [{ text: 'Usage: /fleet peek <name>', style: 'system' }] };
-      return handleFleetPeek(fleet, args[1]);
-    case 'stop':
-    case 'kill':
-      if (!args[1]) return { lines: [{ text: 'Usage: /fleet stop <name>', style: 'system' }] };
-      return handleFleetKill(fleet, args[1]);
-    case 'restart':
-      if (!args[1]) return { lines: [{ text: 'Usage: /fleet restart <name>', style: 'system' }] };
-      return handleFleetRestart(fleet, args[1]);
-    default:
-      return {
-        lines: [{ text: `Unknown /fleet subcommand: ${sub}. Try /fleet list.`, style: 'system' }],
-      };
-  }
-}
-
-function handleFleetList(fleet: FleetModule): CommandResult {
-  const children = [...fleet.getChildren().values()];
-  if (children.length === 0) {
-    return { lines: [{ text: '(no children spawned)', style: 'system' }] };
-  }
-  const lines: Line[] = [{ text: '--- Fleet ---', style: 'system' }];
-  for (const c of children) {
-    lines.push({ text: `  ${formatChildRow(c)}`, style: 'system' });
-  }
-  return { lines };
-}
-
-function handleFleetStatus(fleet: FleetModule, name: string | undefined): CommandResult {
-  if (!name) return handleFleetList(fleet);
-  const c = fleet.getChildren().get(name);
-  if (!c) return { lines: [{ text: `Unknown child: ${name}`, style: 'system' }] };
-  const lines: Line[] = [
-    { text: `--- ${c.name} ---`, style: 'system' },
-    { text: `  recipe:     ${c.recipePath}`, style: 'system' },
-    { text: `  dataDir:    ${c.dataDir}`, style: 'system' },
-    { text: `  socket:     ${c.socketPath}`, style: 'system' },
-    { text: `  pid:        ${c.pid ?? '-'}`, style: 'system' },
-    { text: `  status:     ${c.status}`, style: 'system' },
-    { text: `  startedAt:  ${new Date(c.startedAt).toISOString()}`, style: 'system' },
-    { text: `  lastEvent:  ${c.lastEventAt ? new Date(c.lastEventAt).toISOString() : '-'}`, style: 'system' },
-    { text: `  events:     ${c.events.length}`, style: 'system' },
-    { text: `  subscribe:  ${c.subscription.join(', ') || '-'}`, style: 'system' },
-  ];
-  if (c.exitedAt) {
-    lines.push({ text: `  exitedAt:   ${new Date(c.exitedAt).toISOString()}`, style: 'system' });
-    lines.push({ text: `  exitCode:   ${c.exitCode ?? '-'} (${c.exitReason ?? '-'})`, style: 'system' });
-  }
-  return { lines };
-}
-
-function handleFleetPeek(fleet: FleetModule, name: string): CommandResult {
-  const c = fleet.getChildren().get(name);
-  if (!c) return { lines: [{ text: `Unknown child: ${name}`, style: 'system' }] };
-  return {
-    lines: [{ text: `Peeking ${name}. Press Esc to return.`, style: 'system' }],
-    switchToFleetPeek: name,
-  };
-}
-
-function handleFleetKill(fleet: FleetModule, name: string): CommandResult {
-  const asyncWork = (async (): Promise<CommandResult> => {
-    const res = await fleet.handleToolCall({ id: `slash-kill-${Date.now()}`, name: 'kill', input: { name } });
-    if (!res.success) {
-      return { lines: [{ text: `kill ${name} failed: ${res.error ?? 'unknown'}`, style: 'system' }] };
-    }
-    const data = res.data as { status?: string; exitCode?: number | null } | undefined;
-    return {
-      lines: [{ text: `kill ${name}: ${data?.status ?? 'done'} (exit ${data?.exitCode ?? '?'})`, style: 'system' }],
-    };
-  })();
-  return {
-    lines: [{ text: `Stopping ${name}...`, style: 'system' }],
-    asyncWork,
-  };
-}
-
-function handleFleetRestart(fleet: FleetModule, name: string): CommandResult {
-  const asyncWork = (async (): Promise<CommandResult> => {
-    const res = await fleet.handleToolCall({ id: `slash-restart-${Date.now()}`, name: 'restart', input: { name } });
-    if (!res.success) {
-      return { lines: [{ text: `restart ${name} failed: ${res.error ?? 'unknown'}`, style: 'system' }] };
-    }
-    return { lines: [{ text: `${name} restarted.`, style: 'system' }] };
-  })();
-  return {
-    lines: [{ text: `Restarting ${name}...`, style: 'system' }],
-    asyncWork,
-  };
 }

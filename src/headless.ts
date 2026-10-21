@@ -22,9 +22,9 @@
 import { createServer, type Socket, type Server } from 'node:net';
 import { mkdirSync, existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import type { AppContext } from './index.js';
+import type { AppContext } from './context.js';
 import { type IncomingCommand, matchesSubscription } from './modules/fleet-types.js';
-import { AgentTreeReducer } from './state/agent-tree-reducer.js';
+import { AgentTreeReducer } from './store/agent-tree-reducer.js';
 import { setupHeadlessLog } from './logging/headless.js';
 
 // ---------------------------------------------------------------------------
@@ -187,8 +187,8 @@ export async function runHeadless(app: AppContext, argv: string[] = []): Promise
           }
         }
         if (result.switchToSessionId) {
-          await app.switchSession(result.switchToSessionId);
-          emit({ type: 'command-output', text: 'Session switched.', style: 'system' });
+          log('command rejected: session switching has been removed');
+          return;
         }
         if (result.quit) {
           await gracefulShutdown('command:/quit');

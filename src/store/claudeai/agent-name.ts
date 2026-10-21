@@ -1,4 +1,6 @@
 /**
+ * Agent name resolution.
+ * 
  * Resolve which participant name an agent should use when several sources
  * (CLI flag, import-source sidecar, hard-coded default) disagree.
  *

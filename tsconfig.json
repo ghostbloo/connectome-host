@@ -6,9 +6,12 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": ".",
+    "outDir": "./dist",
+    "types": [
+      "@types/bun"
+    ]
   },
-  "include": ["src"],
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

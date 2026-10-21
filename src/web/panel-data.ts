@@ -20,19 +20,16 @@
 
 import type { AgentFramework } from '@animalabs/agent-framework';
 import type { Recipe } from '../recipe.js';
-import type { CallLedger } from '../call-ledger.js';
 import {
   readMcplServersFile,
   DEFAULT_CONFIG_PATH,
-} from '../mcpl-config.js';
+} from '../mcp/mcpl-config.js';
 
 /** Minimal slice of AppContext the panel layer needs. Both the WebUI host
  *  and the headless child runtime satisfy this structurally. */
 export interface PanelAppRef {
   framework: AgentFramework;
   recipe: Recipe;
-  /** Content-free recent provider-call ledger, when the host wired one. */
-  callLedger?: CallLedger | null;
 }
 
 /** Panel operations servable by any conhost process. Kept as a const list so
@@ -642,14 +639,6 @@ export function buildHealthSnapshot(app: PanelAppRef): Record<string, unknown> {
       }
       (snapshot as Record<string, unknown>).runtimeSettings = settings;
     }
-  } catch {
-    // Health reads never throw.
-  }
-  // Recent provider calls. The WebUI host streams these over its own WS;
-  // for a fleet child this snapshot is the only path, so ship them here.
-  try {
-    const ledger = app.callLedger?.snapshot();
-    if (ledger) (snapshot as Record<string, unknown>).callLedger = ledger;
   } catch {
     // Health reads never throw.
   }

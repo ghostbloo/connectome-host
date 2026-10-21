@@ -5,23 +5,20 @@
   "type": "module",
   "scripts": {
     "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit",
     "dev": "bun --watch src/index.ts",
     "test": "bun test",
-    "version": "bun scripts/release-changelog.ts && git add CHANGELOG.md changelog.d",
-    "build:web": "npm --prefix web install && npm --prefix web run build",
-    "build:web:ci": "npm ci --prefix web && npm --prefix web run build",
-    "relock:web": "rm -rf web/node_modules web/package-lock.json && npm --prefix web install",
-    "postinstall": "test -d web && npm --prefix web install && npm --prefix web run build || true"
+    "build": "bun build src/index.ts --target bun --minify --outfile dist/conhost --compile --define BUILD_SHA=\"'$(git describe --always --dirty)'\"",
+    "version": "bun scripts/release-changelog.ts && git add CHANGELOG.md changelog.d"
   },
   "dependencies": {
     "@animalabs/agent-framework": "^0.13.0",
     "@animalabs/chronicle": "^0.3.0",
     "@animalabs/context-manager": "^0.8.0",
-    "@animalabs/membrane": "^0.5.82",
-    "@opentui/core": "^0.1.82"
+    "@animalabs/membrane": "^0.5.82"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.13",
+    "@types/bun": "^1.4.2",
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0"
   },

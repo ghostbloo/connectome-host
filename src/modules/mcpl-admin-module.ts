@@ -42,7 +42,7 @@ import {
   saveAgentOverlay,
   resolveOverlayEntry,
   type AgentOverlayEntry,
-} from '../mcpl-config.js';
+} from '../mcp/mcpl-config.js';
 
 export interface McplAdminModuleConfig {
   /** IANA zone propagated to newly deployed stdio servers. */

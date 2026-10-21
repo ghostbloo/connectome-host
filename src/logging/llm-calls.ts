@@ -26,12 +26,6 @@ export type LlmCallContentMode = 'content' | 'metadata_only';
 
 export interface LlmCallLogConfig {
   /**
-   * Where logs go:
-   * - 'file': llm-calls.<iso>.jsonl in the data dir.
-   * - 'stdout': one tagged JSON line per call.
-   */
-  transport: LlmCallTransport;
-  /**
    * What gets logged:
    * - 'content': response bodies; request bodies on refusals/errors
    * - 'metadata_only': no conversation content.
@@ -39,7 +33,7 @@ export interface LlmCallLogConfig {
   contentMode: LlmCallContentMode;
 }
 
-export const DEFAULT_LLM_CALL_LOG_CONFIG: LlmCallLogConfig = { transport: 'file', contentMode: 'content' };
+export const DEFAULT_LLM_CALL_LOG_CONFIG: LlmCallLogConfig = { contentMode: 'metadata_only' };
 
 const MAX_RECORD_BYTES = 16 * 1024 * 1024;
 
@@ -83,16 +77,16 @@ export function toMetadataOnly(record: Record<string, unknown>): Record<string, 
   return out;
 }
 
+export type LlmCallLogOptions = Partial<LlmCallLogConfig> & {
+  provider: string;
+}
+
 export class LlmCallLog {
-  readonly transport: LlmCallTransport;
   readonly contentMode: LlmCallContentMode;
-  private readonly path: string;
   private readonly provider: string;
 
-  constructor(opts: { path: string; provider: string } & Partial<LlmCallLogConfig>) {
-    this.path = opts.path;
+  constructor(opts: LlmCallLogOptions) {
     this.provider = opts.provider;
-    this.transport = opts.transport ?? DEFAULT_LLM_CALL_LOG_CONFIG.transport;
     this.contentMode = opts.contentMode ?? DEFAULT_LLM_CALL_LOG_CONFIG.contentMode;
   }
 
@@ -110,15 +104,7 @@ export class LlmCallLog {
         const { rawRequest: _rq, rawResponse: _rr, ...rest } = shaped;
         line = JSON.stringify({ ...rest, truncated: 'raw bodies dropped (record exceeded size guard)' });
       }
-      if (this.transport === 'stdout') {
-        process.stdout.write(`${JSON.stringify({ logger: 'llm-calls', provider: this.provider, ...JSON.parse(line) })}\n`);
-        return;
-      }
-      appendFileSync(this.path, line + '\n');
-      if (opts.fsync) {
-        const fd = openSync(this.path, 'r');
-        try { fsyncSync(fd); } finally { closeSync(fd); }
-      }
+      process.stdout.write(`${JSON.stringify({ logger: 'llm-calls', provider: this.provider, ...JSON.parse(line) })}\n`);
     } catch {
       // never throw from logging
     }

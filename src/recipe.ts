@@ -13,7 +13,7 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, chmodSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
-import { buildWorkspaceMounts } from './workspace-mounts.js';
+import { buildWorkspaceMounts } from './mounts/workspace-mounts.js';
 import type { McplLogConfig } from './logging/mcpl.js';
 import type { LlmCallLogConfig } from './logging/llm-calls.js';
 import type { HeadlessLogConfig } from './logging/headless.js';
@@ -163,14 +163,14 @@ export interface RecipeKvUnifiedConfig {
 }
 
 export interface RecipeAgent {
-  name?: string;
-  model?: string;
+  name: string;
+  model: string;
   /** IANA zone used when rendering wall-clock times to the agent. */
   timezone?: string;
   /** Provider transport. Omitted preserves the historical Anthropic default.
    * 'mock' wires membrane's MockAdapter — canned/echo responses, no API key,
    * no provider spend; for exercising the full host loop offline. */
-  provider?: 'anthropic' | 'openai-responses' | 'openai-codex' | 'openrouter' | 'bedrock' | 'openai-compatible' | 'mock';
+  provider: 'anthropic' | 'openai-responses' | 'openai-codex' | 'openrouter' | 'bedrock' | 'openai-compatible' | 'mock';
   /**
    * Base URL of an OpenAI-compatible chat-completions endpoint, e.g.
    * `http://localhost:11434/v1` (Ollama), a vLLM server, Together, Groq,
@@ -958,32 +958,6 @@ export interface RecipeLogging {
 }
 
 // ---------------------------------------------------------------------------
-// Default recipe
-// ---------------------------------------------------------------------------
-
-export const DEFAULT_RECIPE: Recipe = {
-  name: 'Agent',
-  description: 'General-purpose assistant with tool access',
-  agent: {
-    name: 'agent',
-    cacheTtl: '1h',
-    systemPrompt: [
-      'You are a helpful assistant. You have access to tools provided by connected MCP servers.',
-      'Use them to help the user with their tasks.',
-      '',
-      'You can create persistent notes and write files to `products/` as outputs of your work.',
-    ].join('\n'),
-  },
-  modules: {
-    // subagents + lessons + retrieval deliberately omitted — all opt-in only
-    // (retrieval additionally adds per-turn context churn + retrieval-model costs);
-    // see the RecipeModules field docs.
-    wake: true,
-    workspace: true,
-  },
-};
-
-// ---------------------------------------------------------------------------
 // Environment variable substitution
 // ---------------------------------------------------------------------------
 
@@ -1315,6 +1289,10 @@ export function validateRecipe(raw: unknown): Recipe {
   }
 
   const agent = obj.agent as Record<string, unknown>;
+  if (!agent.name) throw new Error('Invalid recipe: missing recipe.agent.name');
+  if (!agent.model) throw new Error('Invalid recipe: missing recipe.agent.model');
+  if (!agent.provider) throw new Error('Invalid recipe: missing recipe.agent.provider');
+  
   // Absent or empty systemPrompt is a valid configuration: '' is dropped at
   // the provider boundary (membrane omits falsy `system`), so the wire
   // request carries no system block at all.

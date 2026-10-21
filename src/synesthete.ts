@@ -6,6 +6,7 @@
  */
 
 import type { Membrane } from '@animalabs/membrane';
+import type { AppContext } from './context';
 
 const DEFAULT_EXAMPLES = [
   'Context Window Budgeting',
@@ -65,4 +66,44 @@ export async function generateSessionName(
   } catch {
     return null;
   }
+}
+
+export function setupSynesthete(app: AppContext): void {
+  const agentName = app.agentName;
+  const namingExamples = app.recipe.sessionNaming?.examples;
+
+  app.framework.onTrace((event) => {
+    if (event.type !== 'message:added') return;
+    const e = event as unknown as { source: string };
+    if (e.source !== 'external-message') return;
+
+    app.userMessageCount++;
+    if (app.userMessageCount !== 3) return;
+
+    const session = app.sessionManager.getActiveSession();
+    if (!session || session.manuallyNamed) return;
+
+    const agent = app.framework.getAgent(agentName);
+    const cm = agent?.getContextManager();
+    if (!cm) return;
+
+    const { messages } = cm.queryMessages({});
+    const summary = messages
+      .filter(m => m.content.some((b: { type: string }) => b.type === 'text'))
+      .slice(0, 6)
+      .map(m => {
+        const text = m.content
+          .filter((b: { type: string }): b is { type: 'text'; text: string } => b.type === 'text')
+          .map((b: { text: string }) => b.text)
+          .join(' ');
+        return `${m.participant}: ${text.slice(0, 200)}`;
+      })
+      .join('\n');
+
+    generateSessionName(app.membrane, summary, namingExamples).then(name => {
+      if (name) {
+        app.sessionManager.renameSession(session.id, name, false);
+      }
+    });
+  });
 }

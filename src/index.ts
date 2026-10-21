@@ -15,125 +15,39 @@
  *   DATA_DIR            - Data directory for sessions (default: ./data)
  */
 
-import {
-  AnthropicXmlFormatter,
-  BedrockAdapter,
-  Membrane,
-  MockAdapter,
-  NativeFormatter,
-  OpenAIResponsesAPIAdapter,
-  OpenAIResponsesFormatter,
-  OpenAICompatibleAdapter,
-  OpenRouterAdapter,
-} from '@animalabs/membrane';
-import { LoggingAnthropicAdapter } from './logging-adapter.js';
-import { LoggingProviderAdapter } from './logging-provider-wrapper.js';
-import { DEFAULT_LLM_CALL_LOG_CONFIG, LlmCallLog } from './logging/llm-calls.js';
-import { gateTelemetryHeaders, stampedTrigger, type TurnTrigger } from './gate-telemetry.js';
-import { LoggingBedrockAdapter } from './logging-bedrock-adapter.js';
-import { CodexSubscriptionAdapter } from './codex-subscription-adapter.js';
-import type { CallLedger } from './call-ledger.js';
+import { LoggingAnthropicAdapter } from './membrane/logging-adapter.js';
 import { SettingsModule } from './modules/settings-module.js';
-import { AgentFramework, WorkspaceModule, resolveTimeZone, type Module } from '@animalabs/agent-framework';
-import { resolve, join } from 'node:path';
-import { readFileSync, existsSync } from 'node:fs';
-import { SubagentModule } from './modules/subagent-module.js';
-import { LessonsModule } from './modules/lessons-module.js';
-import { RetrievalModule } from './modules/retrieval-module.js';
-import { buildRetrievalModuleConfig } from './retrieval-config.js';
-import { TuiModule } from './modules/tui-module.js';
-import { TimeModule } from './modules/time-module.js';
-import { FleetModule, type FleetModuleConfig } from './modules/fleet-module.js';
-import { ActivityModule } from './modules/activity-module.js';
-import { SubscriptionGcModule } from './modules/subscription-gc-module.js';
-import { ChannelModeModule } from './modules/channel-mode-module.js';
-import { WebUiModule } from './modules/web-ui-module.js';
-import { ObserversModule } from './modules/observers-module.js';
-import { IdentityModule } from './modules/identity-module.js';
-import { McplAdminModule } from './modules/mcpl-admin-module.js';
-import { TtsRelayModule } from './modules/tts-relay-module.js';
-import { InstructionsModule } from './modules/instructions-module.js';
-import { loadMcplServers, applyAgentOverlay, composeMcplChildEnv, DEFAULT_CONFIG_PATH, DEFAULT_AGENT_OVERLAY_PATH } from './mcpl-config.js';
-import { SessionManager } from './session-manager.js';
-import { resolveAgentName } from './agent-name.js';
-import { generateSessionName } from './synesthete.js';
+import { setupSynesthete } from './synesthete.js';
 import {
   type Recipe,
-  DEFAULT_RECIPE,
   loadRecipeDetailed,
   saveRecipe,
   loadSavedRecipe,
-  clearSavedRecipe,
   parseRecipeArg,
 } from './recipe.js';
-import { createBranchState, resetBranchState, handleExport, type BranchState } from './commands.js';
-import { buildFrameworkAgentConfig, membraneCachingOverride } from './framework-agent-config.js';
-import { buildFrameworkStrategy, buildConversationsConfig } from './framework-strategy.js';
-import { buildWorkspaceMounts } from './workspace-mounts.js';
-import { logKeepaliveEvent } from './cache-keepalive-log.js';
-import { loadExtensions } from './extensions.js';
 import { defaultMcplLogConfig, setupMcplStderrLog } from './logging/mcpl.js';
+import type { AppContext } from './context.js';
+import { createFramework } from './framework.js';
+import { type Module, resolveTimeZone } from '@animalabs/agent-framework';
+import { loadExtensions } from './extensions.js';
+import { SessionManager } from './session-manager.js';
+import { TimeModule } from './modules/time-module.js';
+import { createMembrane } from './membrane/adapters.js';
 
-export type { AppContext };
-
-const headless = process.argv.includes('--headless');
-const noTui = !headless && (process.argv.includes('--no-tui') || !process.stdin.isTTY);
-
-const config = {
-  apiKey: process.env.ANTHROPIC_API_KEY,
-  // OAuth/Bearer token (e.g. a Claude subscription token). When set, it takes
-  // precedence over the API key so requests never carry both auth schemes.
-  authToken: process.env.ANTHROPIC_AUTH_TOKEN,
-  openaiApiKey: process.env.OPENAI_API_KEY,
-  openrouterApiKey: process.env.OPENROUTER_API_KEY,
-  // Deliberately NO fallback to OPENAI_API_KEY: agent.baseUrl is
-  // recipe-controlled, so a fallback would silently send a real OpenAI
-  // credential as a Bearer token to whatever endpoint a recipe names.
-  openaiCompatibleApiKey: process.env.OPENAI_COMPATIBLE_API_KEY,
-  codexBinary: process.env.CODEX_BINARY,
-  model: process.env.MODEL,
-  dataDir: process.env.DATA_DIR || './data',
-};
-
-// ---------------------------------------------------------------------------
-// AppContext — mutable container for session switching
-// ---------------------------------------------------------------------------
-
-interface AppContext {
-  framework: AgentFramework;
-  membrane: Membrane;
-  sessionManager: SessionManager;
-  recipe: Recipe;
-  /**
-   * Resolved at startup from recipe + active session's import sidecar +
-   * default. Used downstream by createFramework, setupSynesthete, etc. so
-   * the priority chain isn't recomputed (and potentially drifted) at each
-   * call site. Stays stable across `switchSession` — see note in main().
-   */
-  agentName: string;
-  branchState: BranchState;
-  userMessageCount: number;
-  codexAdapter?: CodexSubscriptionAdapter;
-  /** Content-free recent provider-call ledger. Consumed by the panel-data
-   *  layer (health snapshots) in BOTH runtimes — WebUI host and headless
-   *  fleet child. Null when the provider adapter exposes no ledger. */
-  callLedger: CallLedger | null;
-
-  /** Stop current framework, switch to a different session, start new framework. */
-  switchSession(id: string): Promise<void>;
-}
+declare const BUILD_SHA: string;
+/** `git describe --always --dirty` at build time (`bun run build`); 'unbuilt' when run from source. */
+export const CONHOST_BUILD = typeof BUILD_SHA === 'undefined' ? 'unbuilt' : BUILD_SHA;
 
 // ---------------------------------------------------------------------------
 // Recipe resolution
 // ---------------------------------------------------------------------------
 
-async function resolveRecipe(): Promise<Recipe> {
+async function resolveRecipe(config: {
+  dataDir: string,
+}): Promise<Recipe> {
   const { source, noRecipe } = parseRecipeArg(process.argv);
-
   if (noRecipe) {
-    clearSavedRecipe(config.dataDir);
-    console.log('Starting with default recipe.');
-    return DEFAULT_RECIPE;
+    throw new Error('Missing argument: recipePath');
   }
 
   if (source) {
@@ -155,603 +69,12 @@ async function resolveRecipe(): Promise<Recipe> {
   // a misconfigured agent on the default recipe.
   try {
     const saved = await loadSavedRecipe(config.dataDir);
-    if (saved) {
-      console.log(`Resuming recipe: ${saved.name}`);
-      return saved;
-    }
+    if (!saved) throw new Error('Recipe not found');
+    console.log(`Resuming recipe: ${saved.name}`);
+    return saved;
   } catch (err) {
-    console.error(
-      `Failed to resume saved recipe from ${config.dataDir}:`,
-      err instanceof Error ? err.message : err,
-    );
-    process.exit(1);
+    throw new Error(`Failed to resume saved recipe from ${config.dataDir}:`, { cause: err });
   }
-
-  return DEFAULT_RECIPE;
-}
-
-// ---------------------------------------------------------------------------
-// Framework factory
-// ---------------------------------------------------------------------------
-
-function resolveModel(recipe: Recipe): string {
-  return config.model || recipe.agent.model ||
-    (recipe.agent.provider === 'openai-codex' ? 'gpt-5.4' : 'claude-opus-4-6');
-}
-
-async function createFramework(
-  membrane: Membrane,
-  storePath: string,
-  recipe: Recipe,
-  agentName: string,
-  settingsModule: SettingsModule,
-  callLedger: CallLedger | null,
-): Promise<AgentFramework> {
-  const model = resolveModel(recipe);
-  const modules = recipe.modules ?? {};
-  const timeZone = resolveTimeZone(recipe.agent.timezone);
-
-  // Load recipe extensions first — custom strategies must be registered
-  // before buildFrameworkStrategy runs, and custom modules join the module
-  // list below. The loader is a dumb local import; see src/extensions.ts.
-  const extensionRegistry = await loadExtensions(recipe);
-
-  // -- Build module list --
-  // SettingsModule is constructed in main() (before the adapter, so the
-  // adapter can read its state for cross-cutting concerns like reasoning).
-  const moduleInstances: Module[] = [new TuiModule(), new TimeModule(timeZone), settingsModule];
-
-  // Subagents. OPT-IN — not part of the standard recipe; enable explicitly
-  // via modules.subagents when an agent should fork parallel workers.
-  let subagentModule: SubagentModule | null = null;
-  if (modules.subagents) {
-    const subagentConfig = typeof modules.subagents === 'object' ? modules.subagents : {};
-    subagentModule = new SubagentModule({
-      parentAgentName: agentName,
-      defaultModel: subagentConfig.defaultModel || model,
-      defaultMaxTokens: subagentConfig.defaultMaxTokens,
-    });
-    moduleInstances.push(subagentModule);
-  }
-
-  // Lessons. OPT-IN — not part of the standard recipe; enable explicitly via
-  // modules.lessons for agents that curate a lesson library.
-  let lessonsModule: LessonsModule | null = null;
-  if (modules.lessons) {
-    const globalLessonsPath = resolve(join(storePath, '..', '..', 'lessons.json'));
-    lessonsModule = new LessonsModule({ globalPath: globalLessonsPath });
-    moduleInstances.push(lessonsModule);
-  }
-
-  // Fleet (cross-process child orchestration). Opt-in via recipe.
-  if (modules.fleet === true) {
-    moduleInstances.push(new FleetModule({ timeZone }));
-  } else if (modules.fleet && typeof modules.fleet === 'object') {
-    const fleetCfg = modules.fleet;
-    const fleetModuleConfig: FleetModuleConfig = {};
-    fleetModuleConfig.timeZone = timeZone;
-    if (fleetCfg.children) {
-      fleetModuleConfig.autoStart = fleetCfg.children.map((c) => {
-        const entry: NonNullable<FleetModuleConfig['autoStart']>[number] = {
-          name: c.name,
-          recipe: c.recipe,
-          autoStart: c.autoStart !== false,  // default true
-        };
-        if (c.dataDir !== undefined) entry.dataDir = c.dataDir;
-        if (c.env !== undefined) entry.env = c.env;
-        if (c.subscription !== undefined) entry.subscription = c.subscription;
-        if (c.autoRestart !== undefined) entry.autoRestart = c.autoRestart;
-        return entry;
-      });
-    }
-    if (fleetCfg.allowedRecipes !== undefined) fleetModuleConfig.allowedRecipes = fleetCfg.allowedRecipes;
-    if (fleetCfg.defaultSubscription !== undefined) fleetModuleConfig.defaultSubscription = fleetCfg.defaultSubscription;
-    if (fleetCfg.socketWaitTimeoutMs !== undefined) fleetModuleConfig.socketWaitTimeoutMs = fleetCfg.socketWaitTimeoutMs;
-    if (fleetCfg.readyTimeoutMs !== undefined) fleetModuleConfig.readyTimeoutMs = fleetCfg.readyTimeoutMs;
-    if (fleetCfg.gracefulShutdownMs !== undefined) fleetModuleConfig.gracefulShutdownMs = fleetCfg.gracefulShutdownMs;
-    if (fleetCfg.sigtermEscalationMs !== undefined) fleetModuleConfig.sigtermEscalationMs = fleetCfg.sigtermEscalationMs;
-    moduleInstances.push(new FleetModule(fleetModuleConfig));
-  }
-
-  // Retrieval (requires lessons). OPT-IN — not part of the standard recipe:
-  // it injects context-dependent content into every compile (plus up to two
-  // configured retrieval-model calls), which adds per-turn context churn.
-  // Enable explicitly only when an agent actually curates a lesson library.
-  if (modules.retrieval && lessonsModule) {
-    moduleInstances.push(new RetrievalModule(
-      buildRetrievalModuleConfig(membrane, modules.retrieval, recipe.agent.provider),
-    ));
-  }
-
-  // Gate config — core AF EventGate feature.
-  // Path is per-session: {storePath}/config/gate.json
-  let gateOptions: import('@animalabs/agent-framework').GateOptions | undefined;
-  if (modules.wake !== false) {
-    gateOptions = { configPath: join(storePath, 'config', 'gate.json') };
-    if (typeof modules.wake === 'object' && 'policies' in modules.wake) {
-      gateOptions.config = modules.wake as import('@animalabs/agent-framework').GateConfig;
-    }
-    // Privileged-users file for the `sleep` tool — users who may wake the agent
-    // through a sleep window. Stable across sessions (install-dir relative);
-    // override with SLEEP_PRIVILEGED_FILE. Edit the file to change the list.
-    gateOptions.privilegedUsersPath =
-      process.env.SLEEP_PRIVILEGED_FILE || resolve('./sleep-privileged.json');
-  }
-
-  // Workspace (replaces FilesModule + LocalFilesModule)
-  // Note: workspace: false disables ALL filesystem access (both read and write).
-  // Previously LocalFilesModule was always-on; this is an intentional change —
-  // recipes that need read-only access should keep workspace enabled (the default).
-  // Mount construction lives in workspace-mounts.ts so recipe validation
-  // reasons over the SAME mount flags the runtime builds (see that file's
-  // header for why).
-  let workspaceModule: WorkspaceModule | null = null;
-  const workspaceMounts = buildWorkspaceMounts(modules.workspace, storePath);
-  if (workspaceMounts) {
-    workspaceModule = new WorkspaceModule({ mounts: workspaceMounts });
-    moduleInstances.push(workspaceModule);
-  }
-
-  // Shared operating instructions — opt-in per recipe. Injects a living
-  // instructions document (read through a workspace mount) into EVERY
-  // agent's context on every turn — resident and ephemeral subagents alike —
-  // via gatherContext. Requires the workspace module; validateRecipe rejects
-  // the instructions+`workspace: false` pairing, so workspaceModule is
-  // non-null here (the guard keeps the module fail-open regardless).
-  if (modules.instructions) {
-    const instructionsConfig =
-      typeof modules.instructions === 'object' ? modules.instructions : {};
-    const instructionsModule = new InstructionsModule(instructionsConfig);
-    if (workspaceModule) instructionsModule.setWorkspace(workspaceModule);
-    moduleInstances.push(instructionsModule);
-  }
-
-  // Activity (typing indicators) — opt-in per recipe
-  let activityModule: ActivityModule | null = null;
-  if (modules.activity !== undefined && modules.activity !== false) {
-    const activityConfig = typeof modules.activity === 'object' ? modules.activity : {};
-    activityModule = new ActivityModule({ initialChannels: activityConfig.channels });
-    moduleInstances.push(activityModule);
-  }
-
-  // Auto-unsubscribe noisy ambient channels — ON by default (opt out with
-  // `modules.subscriptionGc: false`).
-  if (modules.subscriptionGc !== false) {
-    const gcConfig =
-      typeof modules.subscriptionGc === 'object' ? modules.subscriptionGc : {};
-    moduleInstances.push(
-      new SubscriptionGcModule({
-        defaultLimitChars: gcConfig.defaultLimitChars,
-        serverId: gcConfig.serverId,
-        toolPrefix: gcConfig.toolPrefix,
-      }),
-    );
-  }
-
-  // Channel attention modes (`set_channel_mode`). Needs the gate to add/remove
-  // the per-channel debounce policy, so only when `wake` is enabled. On by
-  // default there (opt out with `modules.channelMode: false`); it only adds a
-  // tool, inert until called.
-  let channelModeModule: ChannelModeModule | null = null;
-  if (gateOptions && modules.channelMode !== false) {
-    const cmConfig =
-      typeof modules.channelMode === 'object' ? modules.channelMode : {};
-    channelModeModule = new ChannelModeModule({
-      serverId: cmConfig.serverId,
-      toolPrefix: cmConfig.toolPrefix,
-      gcModuleName: cmConfig.gcModuleName,
-      defaultDebounceMs: cmConfig.defaultDebounceMs,
-    });
-    moduleInstances.push(channelModeModule);
-  }
-
-  // MCPL self-administration — opt-in per recipe (grants the agent the
-  // ability to spawn arbitrary commands via mcpl_deploy; see recipe.ts).
-  let mcplAdminModule: McplAdminModule | null = null;
-  if (modules.mcplAdmin === true || typeof modules.mcplAdmin === 'object') {
-    const surface = typeof modules.mcplAdmin === 'object' ? modules.mcplAdmin.surface : undefined;
-    mcplAdminModule = new McplAdminModule({ timeZone, ...(surface ? { surface } : {}) });
-    moduleInstances.push(mcplAdminModule);
-  }
-
-  // Archipelago identity — opt-in per recipe. Utilities-only: enrollment is
-  // one-time and token refresh is rare, so it costs no tool slots (see
-  // identity-module.ts header). Keypair lives at the dataDir level — an
-  // identity belongs to the deployment, not the session.
-  let identityModule: IdentityModule | null = null;
-  if (modules.identity !== undefined && modules.identity !== false) {
-    const idCfg = typeof modules.identity === 'object' ? modules.identity : {};
-    identityModule = new IdentityModule({
-      keyPath: process.env.IDENTITY_KEY_FILE || resolve(config.dataDir, 'identity-key.pem'),
-      home: idCfg.home ?? process.env.IDENTITY_HOME ?? 'id.animalabs.ai',
-      ...(idCfg.audience ? { defaultAudience: idCfg.audience } : {}),
-    });
-    moduleInstances.push(identityModule);
-  }
-
-  // Web admin UI — opt-in per recipe
-  let webUiModule: WebUiModule | null = null;
-  if (modules.webui !== undefined && modules.webui !== false) {
-    const webuiConfig = typeof modules.webui === 'object' ? modules.webui : {};
-    // Observer grants (docs/observability.md): data/observers.json by
-    // default, overridable via OBSERVERS_FILE. The feature is inert until
-    // the file holds at least one grant. The companion ObserversModule
-    // gives the agent grant/revoke tools over the same file — interiority
-    // access is the agent's to give.
-    const observersPath = process.env.OBSERVERS_FILE || resolve(config.dataDir, 'observers.json');
-    webUiModule = new WebUiModule({
-      port: webuiConfig.port,
-      host: webuiConfig.host,
-      basicAuth: webuiConfig.basicAuth,
-      allowedOrigins: webuiConfig.allowedOrigins,
-      observersPath,
-      ...(callLedger ? { callLedger } : {}),
-    });
-    moduleInstances.push(webUiModule);
-    moduleInstances.push(new ObserversModule({
-      path: observersPath,
-      ...(webuiConfig.observersSurface ? { surface: webuiConfig.observersSurface } : {}),
-    }));
-  }
-
-  // TTS relay tap — opt-in per recipe. Pure trace-bus consumer: mirrors the
-  // agent's streaming generation to a melodeus-tts-relay /bot endpoint and
-  // trims posted messages on voice interruptions. See modules.ttsRelay in
-  // recipe.ts for the config contract (url/token validated at recipe load).
-  if (modules.ttsRelay) {
-    moduleInstances.push(new TtsRelayModule(modules.ttsRelay));
-  }
-
-  // Extension-registered modules. Instantiated last so built-in modules keep
-  // their historical positions; each factory gets the minimal runtime context
-  // plus its declaring extension's config blob.
-  const extensionModules: Module[] = [];
-  for (const entry of extensionRegistry.modules) {
-    const instance = entry.factory({ timeZone, storePath, model, config: entry.config });
-    extensionModules.push(instance);
-    moduleInstances.push(instance);
-  }
-
-  // -- Build MCP server list --
-  //
-  // Recipes are opt-in: a file entry from mcpl-servers.json is loaded only
-  // when the recipe references its id under `mcpServers`. Credentials and
-  // the spawn command come from the file; the recipe entry can override
-  // policy fields (channelSubscription, toolPrefix, feature-set toggles,
-  // reconnect). Recipes can also define new servers the file doesn't have
-  // by supplying `command` or `url` themselves.
-  //
-  // The previous behavior loaded every file server for every recipe, which
-  // silently flooded focused recipes (conductor, reviewer) with traffic
-  // from channels the agent never asked to listen to.
-  const recipeServers = recipe.mcpServers ?? {};
-  const fileServers = loadMcplServers(DEFAULT_CONFIG_PATH);
-  const fileServersById = new Map(fileServers.map(s => [s.id, s]));
-
-  // A server entry has EITHER a `command` (stdio) or a `url` (WebSocket); the
-  // framework's McplServerConfig now carries both as optional, so this local
-  // type must too. Previously the url-only branch forced `command: undefined!`,
-  // which then reached `spawn(undefined, …)` and crashed a network-MCPL recipe.
-  const allServers: Array<{ id: string; command?: string; url?: string; [k: string]: unknown }> = [];
-  for (const [id, recipeEntry] of Object.entries(recipeServers)) {
-    const fileEntry = fileServersById.get(id);
-    if (fileEntry) {
-      const merged: Record<string, unknown> = { ...fileEntry };
-      if (recipeEntry.channelSubscription !== undefined) merged.channelSubscription = recipeEntry.channelSubscription;
-      if (recipeEntry.toolPrefix !== undefined) merged.toolPrefix = recipeEntry.toolPrefix;
-      if (recipeEntry.enabledFeatureSets !== undefined) merged.enabledFeatureSets = recipeEntry.enabledFeatureSets;
-      if (recipeEntry.disabledFeatureSets !== undefined) merged.disabledFeatureSets = recipeEntry.disabledFeatureSets;
-      if (recipeEntry.enabledTools !== undefined) merged.enabledTools = recipeEntry.enabledTools;
-      if (recipeEntry.disabledTools !== undefined) merged.disabledTools = recipeEntry.disabledTools;
-      if (recipeEntry.reconnect !== undefined) merged.reconnect = recipeEntry.reconnect;
-      if (recipeEntry.reconnectIntervalMs !== undefined) merged.reconnectIntervalMs = recipeEntry.reconnectIntervalMs;
-      if (recipeEntry.reconnectMaxIntervalMs !== undefined) merged.reconnectMaxIntervalMs = recipeEntry.reconnectMaxIntervalMs;
-      // Let a recipe override/adopt WebSocket transport for a file-defined server.
-      if (recipeEntry.url !== undefined) merged.url = recipeEntry.url;
-      if (recipeEntry.transport !== undefined) merged.transport = recipeEntry.transport;
-      if (recipeEntry.token !== undefined) merged.token = recipeEntry.token;
-      if (recipeEntry.access !== undefined) merged.access = recipeEntry.access;
-      allServers.push(merged as { id: string; command?: string; url?: string; [k: string]: unknown });
-    } else if (recipeEntry.command || recipeEntry.url) {
-      // Recipe-defined server (not in the file config). Spread ALL recipe fields
-      // (command OR url/transport/token, plus policy) verbatim — no fake command.
-      allServers.push({ id, ...recipeEntry } as { id: string; command?: string; url?: string; [k: string]: unknown });
-    }
-  }
-
-  // Apply the agent overlay (mcpl-servers.agent.json): servers the agent
-  // deployed for itself load unconditionally (no recipe opt-in), and
-  // tombstones suppress recipe/file servers the agent unloaded.
-  const finalServers = applyAgentOverlay(allServers, DEFAULT_AGENT_OVERLAY_PATH).map((server) => {
-    const withEnv: { id: string; command?: string; url?: string; [k: string]: unknown } = {
-      ...server,
-      // Stdio MCPL children inherit a single agent-facing wall clock plus the
-      // framework's refusal-annotation suppression baseline (operator env
-      // supersedes the baseline; see composeMcplChildEnv). Protocol
-      // timestamps remain UTC; only their rendered text uses AGENT_TIMEZONE.
-      env: composeMcplChildEnv(server.env as Record<string, string> | undefined, timeZone),
-    };
-    // `access` is a declarative name (recipe/file/overlay); the credential
-    // provider it implies is attached HERE, at load time — fresh credential
-    // per dial via the identity module, never serialized, never in model
-    // context (see identity-module.ts header).
-    if (typeof withEnv.access === 'string' && withEnv.access) {
-      if (identityModule) {
-        const identity = identityModule;
-        const audience = withEnv.access as string;
-        withEnv.accessProvider = () => identity.accessFor(audience);
-      } else {
-        console.error(
-          `[mcpl] server "${server.id}": access "${withEnv.access}" declared but the recipe has no identity module — connecting without credentials`,
-        );
-      }
-    }
-    return withEnv;
-  });
-
-  // No server augmentation needed — gate is wired via FrameworkConfig.gate
-
-  // -- Build strategy --
-  const strategy = buildFrameworkStrategy(recipe, model, timeZone, extensionRegistry);
-  const agentConfig = buildFrameworkAgentConfig(recipe, agentName, model, strategy);
-
-  // Per-channel conversation routing: the recipe agent becomes the trunk
-  // template; forks get a fresh instance of the same recipe strategy.
-  const conversations = buildConversationsConfig(recipe, agentName, model, timeZone, extensionRegistry);
-
-  // -- Create framework --
-  const framework = await AgentFramework.create({
-    storePath,
-    membrane,
-agents: [agentConfig],
-    modules: moduleInstances,
-    mcplServers: finalServers,
-    gate: gateOptions,
-    timeZone,
-    // Client-side programmatic tool calling (code_execution) — recipe opt-in.
-    ...(recipe.codeExecution ? { codeExecution: recipe.codeExecution } : {}),
-    ...(conversations ? { conversations } : {}),
-    // Tune-out's subconscious resident (agent-framework#77) — recipe opt-in,
-    // passed through verbatim; the framework owns the defaults.
-    ...(recipe.subconscious ? { subconscious: recipe.subconscious } : {}),
-  });
-
-  // Wire post-creation hooks
-  // Compression-quarantine klaxon → the framework's ops-alert channel
-  // (failures.log + ops:alert trace + CONNECTOME_OPS_WEBHOOK). The strategy
-  // re-fires this every alarm interval for as long as ANY chunk is
-  // quarantined: quarantined spans stay raw, the fold floor creeps, and the
-  // picker eventually cannot fit the window — a guaranteed future outage
-  // that must never be a silent state.
-  // Duck-typed on both sides so version skew in either dep degrades to a
-  // no-op (the strategy's own stderr klaxon still fires) instead of a crash.
-  {
-    const alarmCapable = strategy as unknown as {
-      setQuarantineAlarmHandler?: (fn: (status: { count: number; keys: string[] }) => void) => void;
-    };
-    const notify = (framework as unknown as {
-      notifyOps?: (kind: string, agent: string, message: string, data?: Record<string, unknown>) => void;
-    }).notifyOps?.bind(framework);
-    if (alarmCapable.setQuarantineAlarmHandler && notify) {
-      alarmCapable.setQuarantineAlarmHandler((status) => {
-        if (status.count === 0) {
-          // All-clear travels the same channel the alarm did, under a
-          // DISTINCT kind: the alarm kind's 15-min ops cooldown must never
-          // swallow the stand-down (silence after an alarm is ambiguous).
-          notify(
-            'compression-quarantine-clear',
-            agentName,
-            'compression quarantine EMPTY — all debt paid; alarm stands down.',
-            { count: 0 },
-          );
-          return;
-        }
-        notify(
-          'compression-quarantine',
-          agentName,
-          `${status.count} chunk(s) in compression quarantine — spans stay raw and WILL eventually exhaust the context budget. Operator action required (inspect refusing content; branch, pin, or clear).`,
-          { count: status.count, keys: status.keys },
-        );
-      });
-    }
-  }
-
-  if (subagentModule) {
-    subagentModule.setFramework(framework);
-  }
-
-  if (activityModule) {
-    activityModule.setFramework(framework);
-  }
-
-  if (channelModeModule) {
-    channelModeModule.setFramework(framework);
-  }
-
-  // Extension modules get the same duck-typed post-creation hook the
-  // built-ins use: if the instance exposes setFramework, call it.
-  for (const instance of extensionModules) {
-    const hooked = instance as unknown as { setFramework?: (f: AgentFramework) => void };
-    hooked.setFramework?.(framework);
-  }
-
-  if (mcplAdminModule) {
-    mcplAdminModule.setFramework(framework);
-    if (identityModule) mcplAdminModule.setIdentity(identityModule);
-  }
-
-  if (workspaceModule) {
-    workspaceModule.initStore(framework.getStore());
-  }
-
-  // Stash the WebUiModule reference on the framework so main() can call
-  // setApp() once the AppContext is built. Using a symbol-keyed property to
-  // avoid polluting the public framework API for the sake of one module.
-  if (webUiModule) {
-    (framework as unknown as Record<symbol, WebUiModule>)[webUiModuleSymbol] = webUiModule;
-  }
-
-  return framework;
-}
-
-const webUiModuleSymbol = Symbol.for('connectome-host:web-ui-module');
-
-function getWebUiModule(framework: AgentFramework): WebUiModule | null {
-  const sym = (framework as unknown as Record<symbol, WebUiModule | undefined>)[webUiModuleSymbol];
-  return sym ?? null;
-}
-
-// ---------------------------------------------------------------------------
-// Synesthete auto-naming hook
-// ---------------------------------------------------------------------------
-
-function setupSynesthete(app: AppContext): void {
-  const agentName = app.agentName;
-  const namingExamples = app.recipe.sessionNaming?.examples;
-
-  app.framework.onTrace((event) => {
-    if (event.type !== 'message:added') return;
-    const e = event as unknown as { source: string };
-    if (e.source !== 'external-message') return;
-
-    app.userMessageCount++;
-    if (app.userMessageCount !== 3) return;
-
-    const session = app.sessionManager.getActiveSession();
-    if (!session || session.manuallyNamed) return;
-
-    const agent = app.framework.getAgent(agentName);
-    const cm = agent?.getContextManager();
-    if (!cm) return;
-
-    const { messages } = cm.queryMessages({});
-    const summary = messages
-      .filter(m => m.content.some((b: { type: string }) => b.type === 'text'))
-      .slice(0, 6)
-      .map(m => {
-        const text = m.content
-          .filter((b: { type: string }): b is { type: 'text'; text: string } => b.type === 'text')
-          .map((b: { text: string }) => b.text)
-          .join(' ');
-        return `${m.participant}: ${text.slice(0, 200)}`;
-      })
-      .join('\n');
-
-    generateSessionName(app.membrane, summary, namingExamples).then(name => {
-      if (name) {
-        app.sessionManager.renameSession(session.id, name, false);
-      }
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Piped/headless mode (--no-tui or non-TTY stdin)
-// ---------------------------------------------------------------------------
-
-async function runPiped(app: AppContext) {
-  const { createInterface } = await import('node:readline');
-  const { handleCommand } = await import('./commands.js');
-
-  let inferenceResolve: (() => void) | null = null;
-
-  app.framework.onTrace((event) => {
-    const e = event as unknown as Record<string, unknown>;
-    switch (event.type) {
-      case 'inference:started':
-        process.stdout.write('\n');
-        break;
-      case 'inference:tokens': {
-        const content = e.content as string;
-        if (content) process.stdout.write(content);
-        break;
-      }
-      case 'inference:completed':
-        process.stdout.write('\n');
-        inferenceResolve?.();
-        inferenceResolve = null;
-        break;
-      case 'inference:failed':
-        console.error(`\nError: ${e.error}`);
-        inferenceResolve?.();
-        inferenceResolve = null;
-        break;
-      case 'inference:tool_calls_yielded': {
-        const calls = e.calls as Array<{ name: string }>;
-        console.log(`\n[tools] ${calls.map(c => c.name).join(', ')}`);
-        break;
-      }
-      case 'tool:started': {
-        const toolInput = e.input ? JSON.stringify(e.input) : '';
-        const truncated = toolInput.length > 120 ? toolInput.slice(0, 120) + '...' : toolInput;
-        console.log(`[tool] ${e.tool}${truncated ? ' ' + truncated : ''}`);
-        break;
-      }
-    }
-  });
-
-  function waitForInference(): Promise<void> {
-    return new Promise(resolve => {
-      inferenceResolve = resolve;
-      setTimeout(() => {
-        if (inferenceResolve === resolve) { inferenceResolve = null; resolve(); }
-      }, 120_000);
-    });
-  }
-
-  async function processLine(line: string): Promise<boolean> {
-    const trimmed = line.trim();
-    if (!trimmed) return false;
-    if (trimmed.startsWith('/')) {
-      const result = handleCommand(trimmed, app);
-      if (result.quit) return true;
-      for (const l of result.lines) console.log(l.text);
-      if (result.branchChanged) {
-        const ws = app.framework.getModule('workspace');
-        if (ws && 'materializeMount' in ws) {
-          await (ws as any).materializeMount('_config');
-        }
-      }
-      if (result.switchToSessionId) {
-        await app.switchSession(result.switchToSessionId);
-        console.log('Session switched.');
-      }
-    } else {
-      app.framework.pushEvent({
-        type: 'external-message', source: 'cli',
-        content: trimmed, metadata: {}, triggerInference: true,
-      });
-      await waitForInference();
-    }
-    return false;
-  }
-
-  // Piped: read all then process
-  if (!process.stdin.isTTY) {
-    const lines: string[] = [];
-    const rl = createInterface({ input: process.stdin });
-    for await (const line of rl) lines.push(line);
-    console.log(`Processing ${lines.length} commands...`);
-    for (const line of lines) {
-      console.log(`> ${line}`);
-      if (await processLine(line)) break;
-    }
-    console.log('Done.');
-    await app.framework.stop();
-    return;
-  }
-
-  // Interactive TTY readline (fallback if --no-tui is explicit on a TTY)
-  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '> ' });
-  console.log('connectome-host (readline mode). Type /help for commands.');
-  rl.prompt();
-  rl.on('line', async (line: string) => {
-    if (await processLine(line)) { rl.close(); return; }
-    rl.prompt();
-  });
-  await new Promise<void>(r => rl.on('close', r));
-  console.log('\nShutting down...');
-  await app.framework.stop();
 }
 
 // ---------------------------------------------------------------------------
@@ -759,293 +82,56 @@ async function runPiped(app: AppContext) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const recipe = await resolveRecipe();
-  const provider = recipe.agent.provider ?? 'anthropic';
-
-  if (provider === 'openrouter' && !config.openrouterApiKey) {
-    console.error('Missing OPENROUTER_API_KEY for recipe provider "openrouter".');
-    process.exit(1);
-  }
-  if (provider === 'openai-responses' && !config.openaiApiKey) {
-    console.error('Missing OPENAI_API_KEY for recipe provider "openai-responses".');
-    process.exit(1);
-  }
-  if (provider === 'bedrock' && !(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)) {
-    console.error('Missing AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY for recipe provider "bedrock".');
-    process.exit(1);
-  }
-  if (provider === 'anthropic' && !config.apiKey && !config.authToken) {
-    console.error('Missing ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN). Set one in .env or environment.');
-    process.exit(1);
-  }
-
-  // SettingsModule constructed early so the adapter can read its state for
-  // cross-cutting concerns (currently: reasoning). It's wired into the
-  // framework's module list inside createFramework().
-  const settingsModule = SettingsModule.fromRecipeThinking(recipe.agent.thinking);
-
-  // Append each LLM request/response/error to a JSONL log per process lifetime
-  // (matches the Hermes-era `llm-calls.<iso>.jsonl` visibility). The adapter
-  // also reads SettingsModule.getReasoning() per call to inject `thinking`
-  // when the agent has toggled reasoning on.
-  const llmLogPath = join(
-    config.dataDir,
-    `llm-calls.${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`,
-  );
-  const llmCallConfig = { ...DEFAULT_LLM_CALL_LOG_CONFIG, ...recipe.logging?.llmCalls };
-  const callLog = (provider: string) => new LlmCallLog({ path: llmLogPath, provider, ...llmCallConfig });
-  // CallLedger (src/call-ledger.ts) is not used at runtime in this fork: its
-  // only consumer was the WebUI panel. The file stays for its cache-verdict
-  // logic; provider-call records go through LlmCallLog.
-  const callLedger: CallLedger | null = null;
-  // The Codex subscription adapter owns ChatGPT login/refresh independently
-  // of the API-key transports below.
-  const codexAdapter = provider === 'openai-codex'
-    ? new CodexSubscriptionAdapter({
-        codexBinary: config.codexBinary,
-        fastMode: recipe.agent.codex?.fastMode ?? false,
-      })
-    : undefined;
-  // Generic OpenAI-compatible chat-completions endpoint (Ollama, vLLM, Together,
-  // Groq, NanoGPT, ...). The recipe carries the endpoint (agent.baseUrl,
-  // validated at load); the key is optional because local servers have none.
-  const openaiCompatibleAdapter = provider === 'openai-compatible'
-    ? new OpenAICompatibleAdapter({
-        baseURL: recipe.agent.baseUrl!,
-        apiKey: config.openaiCompatibleApiKey || undefined,
-        providerName: 'openai-compatible',
-      })
-    : undefined;
-  const openrouterAdapter = provider === 'openrouter'
-    ? new OpenRouterAdapter({
-        apiKey: config.openrouterApiKey!,
-        xTitle: recipe.agent.name ?? recipe.name,
-      })
-    : undefined;
-  // Bedrock: an alternate Claude transport. (Historically for models that
-  // left the direct API — as of 2026-07-31 every 3.5-era id and opus-4-0514
-  // are EOL on Bedrock too, so what actually runs here is the 4-era via
-  // inference profiles.) The adapter reads AWS_* env vars (AWS_REGION
-  // defaults us-west-2) and maps standard Claude model IDs to Bedrock IDs.
-  // Uses the Anthropic-native message shape, so NativeFormatter applies
-  // unchanged. Prompt caching is model-gated
-  // (bedrockModelSupportsPromptCaching): pre-GA families (Claude 3,
-  // 3.5 Sonnet) off, everything currently invokable caches — verified by
-  // live probe 2026-07-31. Still no CallLedger — it's
-  // anthropic-transport-only for now; cache metrics are visible in
-  // llm-calls.jsonl via the logging wrapper.
-  // BEDROCK_BASE_URL routes bedrock-runtime calls through an inference
-  // gateway (gate.animalabs.ai/bedrock/<credSet>) — mirrors the
-  // ANTHROPIC_BASE_URL hook below. The gate reads the agent token from the
-  // SigV4 Credential (AWS_ACCESS_KEY_ID slot), discards the client
-  // signature, and re-signs with real AWS creds held on the gate box.
-  const bedrockAdapter = provider === 'bedrock'
-    ? new LoggingBedrockAdapter(
-        { baseURL: process.env.BEDROCK_BASE_URL || undefined },
-        { log: callLog('bedrock') },
-      )
-    : undefined;
-  // Mock: membrane's canned/echo adapter — the full host loop with zero
-  // provider spend and no credentials (none of the key checks above are
-  // gated on it). Echo is the default because it's the informative shape
-  // for interactive smoke runs; recipe agent.mock.echoMode=false switches
-  // to defaultResponse for deterministic scripted output. It rides the
-  // generic logging decorator so even mock calls leave llm-calls.jsonl
-  // receipts — the observability path is part of what a mock run exercises.
-  const mockAdapter = provider === 'mock'
-    ? new MockAdapter({
-        echoMode: recipe.agent.mock?.echoMode ?? true,
-        ...(recipe.agent.mock?.defaultResponse !== undefined
-          ? { defaultResponse: recipe.agent.mock.defaultResponse }
-          : {}),
-      })
-    : undefined;
-  // -- x-gate-debt-chunks stamp (membrane dynamicHeaders, antra-tess/membrane#65)
-  // The gate records compression-debt per ledger row; debt only changes at
-  // calls, so the per-call series is its full-resolution history ("spoke ->
-  // chunk appeared -> chewed" vs "solver repacked -> queue spiked"). The value
-  // is the SAME reduction /healthz reports (cm getCompressionDebt). Late-bound
-  // through appRef because the framework outlives adapter construction and is
-  // replaced on session switch. Whenever it is unreadable — no framework yet,
-  // multi-agent process (whose debt would we even claim?), no strategy — the
-  // header is simply not sent: an unstamped call is honest, a guessed one lies.
-  let appRefForDebt: AppContext | null = null;
-  // The resident whose turn/debt we stamp. TODO(agent-framework ≥0.14): use a
-  // public getPrimaryAgentName() accessor instead of the private field read.
-  const primaryAgent = (): { name: string; agent: unknown } | null => {
-    const fw = appRefForDebt?.framework;
-    const agents = fw?.getAllAgents() ?? [];
-    const name = (fw as unknown as { primaryAgentName?: string } | undefined)?.primaryAgentName
-      ?? (agents.length === 1 ? agents[0]!.name : undefined);
-    if (!name) return null;
-    const agent = agents.find((a) => a.name === name);
-    return agent ? { name, agent } : null;
-  };
-  const pendingDebtChunks = (): number | null => {
-    try {
-      const p = primaryAgent();
-      if (!p) return null;
-      const strategy = (p.agent as unknown as {
-        getContextManager?: () => { getStrategy?: () => { getCompressionDebt?: () => unknown } };
-      }).getContextManager?.()?.getStrategy?.();
-      const d = strategy?.getCompressionDebt?.() as { pendingChunks?: unknown } | undefined;
-      const n = d?.pendingChunks;
-      return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
-    } catch {
-      return null;
-    }
+  const env = process.env;
+  const dataDir = env.DATA_DIR || null;
+  if (!dataDir) {
+    throw new Error('Missing env var: DATA_DIR');
   };
 
-  // Why the turn in progress fired (heartbeat / a channel message by whom /
-  // operator), read from the framework's active-turn trigger. Same guards as
-  // the debt getter: no framework or several agents
-  // -> null -> the origin trio is simply not sent.
-  const activeTurnTrigger = (): TurnTrigger | null => {
-    try {
-      const fw = appRefForDebt?.framework;
-      if (!fw) return null;
-      const agents = fw.getAllAgents();
-      // ONE adapter serves every agent in this process, so this hook cannot
-      // tell whose request it is decorating: stamp the primary's trigger only
-      // while no other agent (subconscious, fork, ephemeral) has a turn in
-      // flight — see stampedTrigger().
-      const t = stampedTrigger({
-        agents: agents.map((a) => a.name),
-        primary: primaryAgent()?.name,
-        triggerOf: (name) => {
-          const r = fw.getActiveTurnTrigger(name) as
-            (ReturnType<typeof fw.getActiveTurnTrigger> & { wakeChannelId?: string }) | undefined;
-          return r ? { reason: r.reason, source: r.source, channelId: r.channelId, wakeChannelId: r.wakeChannelId, counterparty: r.counterparty } : null;
-        },
-      });
-      return t;
-    } catch {
-      return null;
-    }
-  };
+  const recipe = await resolveRecipe({ dataDir });
+  const timeZone = resolveTimeZone(recipe.agent.timezone);
 
-  const gateTelemetryDynamicHeaders = gateTelemetryHeaders(process.env, pendingDebtChunks, activeTurnTrigger);
+  const modules: Module[] = [];
 
-  const adapter = provider === 'openai-responses'
-    ? new LoggingProviderAdapter({
-        inner: new OpenAIResponsesAPIAdapter({
-          apiKey: config.openaiApiKey!,
-          baseURL: process.env.OPENAI_BASE_URL || undefined,
-        }),
-        log: callLog('openai-responses'),
-      })
-    // Codex/openrouter/openai adapters get the provider-agnostic logging
-    // decorator (llm-calls.jsonl); anthropic and bedrock keep their
-    // purpose-built logging classes below. The bare `codexAdapter` /
-    // `openrouterAdapter` instances stay un-wrapped for auth commands and
-    // dispose() — only the membrane sees the wrapper.
-    : bedrockAdapter
-      ?? (mockAdapter ? new LoggingProviderAdapter({ inner: mockAdapter, log: callLog('mock') }) : undefined)
-      ?? (openrouterAdapter ? new LoggingProviderAdapter({ inner: openrouterAdapter, log: callLog('openrouter') }) : undefined)
-      ?? (openaiCompatibleAdapter ? new LoggingProviderAdapter({ inner: openaiCompatibleAdapter, log: callLog('openai-compatible') }) : undefined)
-      ?? (codexAdapter ? new LoggingProviderAdapter({ inner: codexAdapter, log: callLog('openai-codex') }) : undefined)
-      ?? new LoggingAnthropicAdapter(
-        {
-          // Anthropic OAuth wins over API-key auth when both are present.
-          // Subscription tokens additionally require this beta header.
-          // Recipe-declared betas (agent.anthropicBetas, e.g. context-1m)
-          // are merged into the same anthropic-beta header either way.
-          ...(config.authToken
-            ? {
-                authToken: config.authToken,
-                defaultHeaders: {
-                  'anthropic-beta': ['oauth-2025-04-20', ...(recipe.agent.anthropicBetas ?? [])].join(','),
-                },
-              }
-            : {
-                apiKey: config.apiKey!,
-                ...(recipe.agent.anthropicBetas?.length
-                  ? { defaultHeaders: { 'anthropic-beta': recipe.agent.anthropicBetas.join(',') } }
-                  : {}),
-              }),
-          baseURL: process.env.ANTHROPIC_BASE_URL || undefined,
-          // Double-gated (see src/gate-telemetry.ts): GATE_TELEMETRY=1 AND a
-          // configured base URL, so the stamp can only ever go to a
-          // gateway the operator has declared — never to the vendor's
-          // default endpoint (review finding on the first wiring).
-          ...(gateTelemetryDynamicHeaders ? { dynamicHeaders: gateTelemetryDynamicHeaders } : {}),
-          // Hold this agent's cached prefix warm across idle gaps. Only fires
-          // when the entry is actually near expiry, so a busy agent costs
-          // nothing; only the 1h-TTL primary lane is eligible (the module
-          // skips anything else). Off with cacheKeepalive.enabled: false.
-          cacheKeepalive: {
-            enabled: recipe.agent.cacheKeepalive?.enabled !== false,
-            ...(recipe.agent.cacheKeepalive?.maxIdleHours !== undefined
-              ? { maxIdleMs: recipe.agent.cacheKeepalive.maxIdleHours * 60 * 60_000 }
-              : {}),
-            ...(recipe.agent.cacheKeepalive?.refreshAfterMinutes !== undefined
-              ? { refreshAfterMs: recipe.agent.cacheKeepalive.refreshAfterMinutes * 60_000 }
-              : {}),
-            // Every event — routine refreshes included — goes to stderr, so
-            // all of them land in service-stderr.log next to
-            // [inference-refusal]. See cache-keepalive-log.ts for why this is
-            // not severity-routed.
-            onEvent: logKeepaliveEvent,
-          },
-        },
-        {
-          log: callLog('anthropic'),
-          getReasoning: () => settingsModule.getReasoning(),
-        },
-      );
-
-  // Session management — resolved before Membrane construction so the
-  // active session's import-source sidecar can contribute to agent-name
-  // resolution. Without that, a custom recipe that omits agent.name
-  // combined with a claudeai-imported session falls back to 'agent' on
-  // the live side while the importer + warmup default to 'Claude',
-  // re-creating the namespace fork this branch exists to close.
-  const sessionManager = new SessionManager(config.dataDir);
+  const sessionManager = new SessionManager(dataDir);
   sessionManager.migrateIfNeeded();
-
   let activeSession = sessionManager.getActiveSession();
   if (!activeSession) {
     activeSession = sessionManager.createSession();
   }
-
-  const resolved = resolveAgentName({
-    explicit: recipe.agent.name,
-    sidecar: sessionManager.getImportSource(activeSession.id)?.agentName,
-    default: 'agent',
-  });
-  if (resolved.mismatch) {
-    console.warn(
-      `[recipe vs sidecar] agent name disagreement: recipe says ` +
-      `"${resolved.mismatch.explicit}", session ${activeSession.id}'s ` +
-      `import sidecar says "${resolved.mismatch.sidecar}". Using the ` +
-      `recipe value; warmup output under "${resolved.mismatch.sidecar}" ` +
-      `will be orphaned at agents/${resolved.mismatch.sidecar}/...`,
-    );
-  }
-  const agentName = resolved.name;
-
-  const membrane = new Membrane(adapter, {
-    formatter: provider === 'openai-responses' || provider === 'openai-codex'
-      ? new OpenAIResponsesFormatter()
-      : recipe.agent.formatter === 'anthropic-xml'
-        ? new AnthropicXmlFormatter()
-        : new NativeFormatter(),
-    // Caching default for internal callers (autobio compression,
-    // executeMerge), which read Membrane's defaultPromptCaching rather
-    // than the per-agent flag. Applies on EVERY provider whenever the
-    // recipe/model resolves an explicit answer — an Anthropic recipe with
-    // promptCaching:false must disable internal calls too, and on bedrock
-    // the model gate decides (see bedrockModelSupportsPromptCaching).
-    ...membraneCachingOverride(recipe, resolveModel(recipe)),
-    // Anchor the assistant role for internal callers that don't set
-    // request.assistantParticipant themselves (autobio compression,
-    // executeMerge). Mismatch here flips stored assistant turns to
-    // role: 'user' and the API rejects tool_use blocks riding along.
-    assistantParticipant: agentName,
-  });
-
   const storePath = sessionManager.getStorePath(activeSession.id);
-  const framework = await createFramework(membrane, storePath, recipe, agentName, settingsModule, callLedger);
+
+  const agentSettingsModule = new SettingsModule({
+    reasoning: {
+      enabled: recipe.agent.thinking?.enabled ?? false,
+      budgetTokens: recipe.agent.thinking?.budgetTokens ?? 8192,
+      display: recipe.agent.thinking?.display ?? 'summarized',
+    },
+  });
+  modules.push(agentSettingsModule);
+
+  const { membrane, adapter } = createMembrane({
+    env,
+    recipe,
+    reasoningGetter: agentSettingsModule.getReasoning,
+  });
+
+  // Load recipe extensions first — custom strategies must be registered
+  // before buildFrameworkStrategy runs, and custom modules join the module
+  // list below. The loader is a dumb local import; see src/extensions.ts.
+  const extensionRegistry = await loadExtensions(recipe);
+  const framework = await createFramework({
+    membrane,
+    storePath,
+    recipe,
+    timeZone,
+    dataDir,
+    modules: [
+      ...modules,
+      new TimeModule(timeZone),
+    ],
+    extensionRegistry,
+  });
 
   // Build app context
   const app: AppContext = {
@@ -1053,35 +139,14 @@ async function main() {
     membrane,
     sessionManager,
     recipe,
-    agentName,
-    branchState: createBranchState(),
-    userMessageCount: 0,
-    codexAdapter,
-    callLedger,
-
-    async switchSession(id: string) {
-      handleExport(this);
-      await this.framework.stop();
-      sessionManager.setActiveSession(id);
-      const newStorePath = sessionManager.getStorePath(id);
-      // Note: agentName stays as resolved at startup. A per-session
-      // re-resolution would matter only if recipe.agent.name is absent
-      // AND the user switches between imports that used different
-      // --agent values; not the canonical flow.
-      this.framework = await createFramework(membrane, newStorePath, recipe, this.agentName, settingsModule, callLedger);
-      this.framework.start();
-      this.userMessageCount = 0;
-      resetBranchState(this.branchState);
-      setupSynesthete(this);
-      setupMcplStderrLog(this, {
-        ...defaultMcplLogConfig({ storePath: newStorePath }),
-        ...(recipe.logging?.mcpl ?? {}),
-      });
-      getWebUiModule(this.framework)?.setApp(this);
+    agentName: recipe.agent.name,
+    branchState: {
+      undoStack: [],
+      redoStack: [],
+      checkpoints: new Map(),
     },
+    userMessageCount: 0,
   };
-
-  appRefForDebt = app;
 
   // Off-path refusal dragnet → ops alerts (observability M3): refusals on
   // non-streamed calls (compression/summarizer drains, maintenance) never
@@ -1092,39 +157,29 @@ async function main() {
   // feature-detects notifyOpsAlert for older framework versions.
   if (adapter instanceof LoggingAnthropicAdapter) {
     adapter.onRefusal = (info) => {
-      const fw = app.framework as unknown as {
-        notifyOpsAlert?: (kind: string, agent: string, msg: string, data?: Record<string, unknown>) => void;
-      };
-      fw.notifyOpsAlert?.(
+      app.framework.notifyOpsAlert?.(
         'refusal-offpath',
         app.agentName,
         `off-path refusal (category=${info.category ?? 'unknown'}) on a ${info.messages}-message ` +
-          `complete() call (~${Math.round(info.inputTokens / 1000)}k tok) — likely compression/summarizer`,
+        `complete() call (~${Math.round(info.inputTokens / 1000)}k tok) — likely compression/summarizer`,
         { ...info },
       );
     };
   }
 
-  framework.start();
+  app.framework.start();
   setupSynesthete(app);
   setupMcplStderrLog(app, {
     ...defaultMcplLogConfig({ storePath }),
     ...(recipe.logging?.mcpl ?? {}),
   });
-  getWebUiModule(framework)?.setApp(app);
 
   try {
-    if (headless) {
-      const { runHeadless } = await import('./headless.js');
-      await runHeadless(app, process.argv.slice(2));
-    } else if (noTui) {
-      await runPiped(app);
-    } else {
-      const { runTui } = await import('./tui.js');
-      await runTui(app);
-    }
+    const { runHeadless } = await import('./headless.js');
+    await runHeadless(app, process.argv.slice(2));
   } finally {
-    codexAdapter?.dispose();
+    // @ts-ignore
+    adapter?.dispose();
   }
 }
 

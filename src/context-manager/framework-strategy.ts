@@ -4,9 +4,8 @@ import {
   type ContextStrategy,
   type ConversationRouterConfig,
 } from '@animalabs/agent-framework';
-import type { Recipe, RecipeStrategy } from './recipe.js';
-import { FrontdeskStrategy } from './strategies/frontdesk-strategy.js';
-import { isBuiltinStrategyType, type ExtensionRegistry } from './extensions.js';
+import type { Recipe, RecipeStrategy } from '../recipe.js';
+import { isBuiltinStrategyType, type ExtensionRegistry } from '../extensions.js';
 
 const PASSTHROUGH_KEYS: ReadonlyArray<keyof RecipeStrategy> = [
   'enforceBudget',
@@ -52,12 +51,11 @@ const PASSTHROUGH_KEYS: ReadonlyArray<keyof RecipeStrategy> = [
   'identityReminder',
 ];
 
-export function buildFrameworkStrategy(
+export function buildFrameworkStrategy({ recipe, timeZone, extensions }: {
   recipe: Recipe,
-  model: string,
   timeZone: string,
   extensions?: ExtensionRegistry,
-): ContextStrategy {
+}): ContextStrategy {
   const strategyConfig = recipe.agent.strategy;
   const strategyType = strategyConfig?.type ?? 'autobiographical';
 
@@ -75,20 +73,19 @@ export function buildFrameworkStrategy(
     }
     return factory({
       config: (strategyConfig ?? {}) as RecipeStrategy & Record<string, unknown>,
-      model,
+      model: recipe.agent.model,
       timeZone,
     });
   }
   const autobiographicalOpts: Record<string, unknown> = {
     headWindowTokens: strategyConfig?.headWindowTokens ?? 4000,
     recentWindowTokens: strategyConfig?.recentWindowTokens ?? 30000,
-    compressionModel: strategyConfig?.compressionModel ?? model,
+    compressionModel: strategyConfig?.compressionModel ?? recipe.agent.model,
     ...(strategyConfig?.compressionMaxTokens !== undefined
       ? { compressionMaxTokens: strategyConfig.compressionMaxTokens }
       : {}),
     autoTickOnNewMessage: true,
     maxMessageTokens: strategyConfig?.maxMessageTokens ?? 10000,
-    ...(strategyType === 'frontdesk' ? { timeZone } : {}),
   };
 
   for (const key of PASSTHROUGH_KEYS) {
@@ -104,7 +101,7 @@ export function buildFrameworkStrategy(
   // picker solves a frontier to fit — recipes can still pin
   // `adaptiveResolution: false` as a rollback lever.
   if (
-    (strategyType === 'autobiographical' || strategyType === 'frontdesk') &&
+    (strategyType === 'autobiographical') &&
     autobiographicalOpts.adaptiveResolution === undefined
   ) {
     autobiographicalOpts.adaptiveResolution = true;
@@ -121,7 +118,7 @@ export function buildFrameworkStrategy(
   //   'Claude', which voices self-recollections as a stranger for any agent
   //   not named Claude. Summaries should speak as the agent itself.
   if (
-    (strategyType === 'autobiographical' || strategyType === 'frontdesk') &&
+    (strategyType === 'autobiographical') &&
     autobiographicalOpts.adaptiveResolution !== false &&
     autobiographicalOpts.foldingStrategy === undefined
   ) {
@@ -133,9 +130,7 @@ export function buildFrameworkStrategy(
 
   return strategyType === 'passthrough'
     ? new PassthroughStrategy()
-    : strategyType === 'frontdesk'
-      ? new FrontdeskStrategy(autobiographicalOpts)
-      : new AutobiographicalStrategy(autobiographicalOpts);
+    : new AutobiographicalStrategy(autobiographicalOpts);
 }
 
 /**
@@ -149,20 +144,18 @@ export function buildFrameworkStrategy(
  */
 export function buildConversationsConfig(
   recipe: Recipe,
-  agentName: string,
-  model: string,
   timeZone: string,
   extensions?: ExtensionRegistry,
 ): ConversationRouterConfig | undefined {
   const conv = recipe.conversations;
   if (!conv) return undefined;
   return {
-    templateAgent: agentName,
+    templateAgent: recipe.agent.name,
     ...(conv.bind !== undefined ? { bind: conv.bind } : {}),
     ...(conv.trigger !== undefined ? { trigger: conv.trigger } : {}),
     ...(conv.idleTtlMs !== undefined ? { idleTtlMs: conv.idleTtlMs } : {}),
     ...(conv.closurePrompt !== undefined ? { closurePrompt: conv.closurePrompt } : {}),
     ...(conv.agentPrefix !== undefined ? { agentPrefix: conv.agentPrefix } : {}),
-    strategyFactory: () => buildFrameworkStrategy(recipe, model, timeZone, extensions),
+    strategyFactory: () => buildFrameworkStrategy({ recipe, timeZone, extensions }),
   };
 }

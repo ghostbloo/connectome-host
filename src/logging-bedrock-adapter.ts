@@ -20,7 +20,7 @@ import type {
   ProviderRequestOptions,
   StreamCallbacks,
 } from '@animalabs/membrane';
-import { appendFileSync } from 'node:fs';
+import type { LlmCallLog } from './logging/llm-calls.js';
 
 type BedrockConfig = ConstructorParameters<typeof BedrockAdapter>[0];
 
@@ -65,19 +65,15 @@ function summarizeResponse(response: ProviderResponse): Record<string, unknown> 
 }
 
 export class LoggingBedrockAdapter extends BedrockAdapter {
-  private readonly logPath: string;
+  private readonly callLog: LlmCallLog;
 
-  constructor(config: BedrockConfig, logPath: string) {
+  constructor(config: BedrockConfig, opts: { log: LlmCallLog }) {
     super(config);
-    this.logPath = logPath;
+    this.callLog = opts.log;
   }
 
   private log(record: Record<string, unknown>): void {
-    try {
-      appendFileSync(this.logPath, JSON.stringify(record) + '\n');
-    } catch {
-      // Logging must never break inference.
-    }
+    this.callLog.write(record);
   }
 
   override async complete(

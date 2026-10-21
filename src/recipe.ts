@@ -14,6 +14,9 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, chmodSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { buildWorkspaceMounts } from './workspace-mounts.js';
+import type { McplLogConfig } from './logging/mcpl.js';
+import type { LlmCallLogConfig } from './logging/llm-calls.js';
+import type { HeadlessLogConfig } from './logging/headless.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -938,6 +941,20 @@ export interface Recipe {
   conversations?: RecipeConversations;
   /** Tune-out's subconscious resident (agent-framework#77). */
   subconscious?: RecipeSubconscious;
+  /** Host-side logging. */
+  logging?: RecipeLogging;
+}
+
+/** See src/logging/. Each section's transport: 'file' (the old files in the data dir) or 'stdout'. */
+export interface RecipeLogging {
+  /** Provider-call records. Default `{ transport: 'file', contentMode: 'content' }`. */
+  llmCalls?: Partial<LlmCallLogConfig>;
+  /** MCPL servers' stderr, for debugging. */
+  mcpl?: Partial<McplLogConfig>;
+  /** stdout/stderr (headless.log) */
+  headless?: Partial<HeadlessLogConfig>;
+  /** This isn't an option right now because AgentFramework hardcodes this to `appendFileSync('logs/failures.log')` (wherever that is) and we don't want to bother overriding it. */
+  //failures?: undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -2136,6 +2153,8 @@ export function validateRecipe(raw: unknown): Recipe {
     }
   }
 
+  if (obj.logging !== undefined) validateLogging(obj.logging);
+
   return obj as unknown as Recipe;
 }
 
@@ -2250,4 +2269,40 @@ export function parseRecipeArg(argv: string[]): { source: string | null; noRecip
   }
 
   return { source, noRecipe };
+}
+
+function validateLogging(raw: unknown): void {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Recipe logging must be an object.');
+  const logging = raw as Record<string, unknown>;
+  const sections: Record<string, Record<string, (v: unknown) => boolean>> = {
+    llmCalls: {
+      transport: (v) => v === 'file' || v === 'stdout',
+      contentMode: (v) => v === 'content' || v === 'metadata_only',
+    },
+    mcpl: {
+      transport: (v) => v === 'file' || v === 'stdout',
+      dir: (v) => typeof v === 'string' && isAbsolute(v),
+    },
+    headless: {
+      transport: (v) => v === 'file' || v === 'stdout',
+      dir: (v) => typeof v === 'string' && isAbsolute(v),
+    },
+  };
+  for (const [name, section] of Object.entries(logging)) {
+    const fields = sections[name];
+    if (!fields) {
+      throw new Error(`Recipe logging has unknown field ${JSON.stringify(name)} (known: ${Object.keys(sections).join(', ')}).`);
+    }
+    if (section === undefined) continue;
+    if (!section || typeof section !== 'object' || Array.isArray(section)) throw new Error(`Recipe logging.${name} must be an object.`);
+    for (const [key, value] of Object.entries(section as Record<string, unknown>)) {
+      const ok = fields[key];
+      if (!ok) {
+        throw new Error(`Recipe logging.${name} has unknown field ${JSON.stringify(key)} (known: ${Object.keys(fields).join(', ')}).`);
+      }
+      if (value !== undefined && !ok(value)) {
+        throw new Error(`Recipe logging.${name}.${key} is invalid: ${JSON.stringify(value)}.`);
+      }
+    }
+  }
 }

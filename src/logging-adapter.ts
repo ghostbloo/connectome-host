@@ -26,7 +26,7 @@ import type {
   ProviderRequestOptions,
   StreamCallbacks,
 } from '@animalabs/membrane';
-import { appendFileSync, closeSync, fsyncSync, openSync } from 'node:fs';
+import type { LlmCallLog } from './logging/llm-calls.js';
 import { summarizeCacheControls, type ProviderCallRecord } from './call-ledger.js';
 
 /** Live read of the current reasoning setting. The host wires this to
@@ -52,8 +52,15 @@ function envFlag(value: string | undefined): boolean {
   return value !== undefined && value !== '' && value !== '0' && value.toLowerCase() !== 'false';
 }
 
+export interface LoggingAnthropicAdapterOptions {
+  /** Where call records go (file or stdout) and how much content they keep. */
+  log: LlmCallLog;
+  getReasoning?: ReasoningGetter;
+  onCall?: ProviderCallObserver;
+}
+
 export class LoggingAnthropicAdapter extends AnthropicAdapter {
-  private readonly logPath: string;
+  private readonly callLog: LlmCallLog;
   private readonly getReasoning?: ReasoningGetter;
   private readonly onCall?: ProviderCallObserver;
   /** True when authenticated with an OAuth/Bearer token instead of an API
@@ -70,14 +77,12 @@ export class LoggingAnthropicAdapter extends AnthropicAdapter {
 
   constructor(
     config: ConstructorParameters<typeof AnthropicAdapter>[0],
-    logPath: string,
-    getReasoning?: ReasoningGetter,
-    onCall?: ProviderCallObserver,
+    opts: LoggingAnthropicAdapterOptions,
   ) {
     super(config);
-    this.logPath = logPath;
-    this.getReasoning = getReasoning;
-    this.onCall = onCall;
+    this.callLog = opts.log;
+    this.getReasoning = opts.getReasoning;
+    this.onCall = opts.onCall;
     this.oauthMode = Boolean(config?.authToken);
   }
 
@@ -137,21 +142,10 @@ export class LoggingAnthropicAdapter extends AnthropicAdapter {
   }
 
   private log(record: Record<string, unknown>): void {
-    try {
-      appendFileSync(this.logPath, JSON.stringify(record) + '\n');
-      // Crossing warmup enables full payloads because this JSONL is the
-      // durable per-attempt ledger. Flush every completed call before control
-      // returns to Context Manager, so a process death cannot leave a minted
-      // memory whose provider attempt vanished from the crossing record.
-      if (this.fullPayloads) {
-        const fd = openSync(this.logPath, 'r');
-        try { fsyncSync(fd); } finally { closeSync(fd); }
-      }
-    } catch {
-      // Ordinary observability must never throw from logging. Crossing mode
-      // independently refuses convergence when its required ledger is absent
-      // or inconsistent.
-    }
+    // Crossing warmup enables full payloads because this JSONL is the durable
+    // per-attempt ledger: fsync each record so a process death cannot leave a
+    // minted memory whose provider attempt vanished from the record.
+    this.callLog.write(record, { fsync: this.fullPayloads && this.callLog.keepsContent });
   }
 
   private requestSummary(request: ProviderRequest, rawRequest?: unknown): Record<string, unknown> {
@@ -240,6 +234,7 @@ export class LoggingAnthropicAdapter extends AnthropicAdapter {
   }
 
   private refusalRawRequest(response: ProviderResponse, rawRequest: unknown): unknown {
+    if (!this.callLog.keepsContent) return undefined;
     if (this.fullPayloads) return rawRequest;
     const raw = (response as { raw?: { stop_reason?: string } }).raw;
     return raw?.stop_reason === 'refusal' ? rawRequest : undefined;

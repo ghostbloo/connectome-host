@@ -20,11 +20,12 @@
  */
 
 import { createServer, type Socket, type Server } from 'node:net';
-import { createWriteStream, mkdirSync, existsSync, unlinkSync, writeFileSync, type WriteStream } from 'node:fs';
+import { mkdirSync, existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { AppContext } from './index.js';
 import { type IncomingCommand, matchesSubscription } from './modules/fleet-types.js';
 import { AgentTreeReducer } from './state/agent-tree-reducer.js';
+import { setupHeadlessLog } from './logging/headless.js';
 
 // ---------------------------------------------------------------------------
 // Local types
@@ -60,44 +61,14 @@ export async function runHeadless(app: AppContext, argv: string[] = []): Promise
   const opts = parseHeadlessArgs(argv);
   const dataDir = resolve(process.env.DATA_DIR || './data');
   const socketPath = opts.socketPath ?? join(dataDir, 'ipc.sock');
-  const logPath = join(dataDir, 'headless.log');
   const pidPath = join(dataDir, 'headless.pid');
 
   mkdirSync(dataDir, { recursive: true });
 
-  // -- Redirect stdout/stderr BEFORE anything else may log --
-  // The IPC socket is the only structured output channel; stdout/stderr
-  // become a debug log on disk.  Done first so any later console.log from
-  // framework code lands in the file, not on a parent's pipe.
-  //
-  // Match the real process.stdout.write overload signature so libraries
-  // passing (chunk, cb) or (chunk, encoding, cb) for backpressure /
-  // flush confirmation don't have their callbacks silently swallowed.
-  const logStream: WriteStream = createWriteStream(logPath, { flags: 'a' });
-  type StdWrite = typeof process.stdout.write;
-  const makeRedirect = (): StdWrite => {
-    const redirect = function (
-      this: unknown,
-      chunk: string | Uint8Array,
-      encodingOrCb?: BufferEncoding | ((err?: Error | null) => void),
-      cb?: (err?: Error | null) => void,
-    ): boolean {
-      if (typeof encodingOrCb === 'function') {
-        return logStream.write(chunk, encodingOrCb);
-      }
-      if (encodingOrCb !== undefined) {
-        return logStream.write(chunk, encodingOrCb, cb);
-      }
-      return logStream.write(chunk);
-    } as StdWrite;
-    return redirect;
-  };
-  process.stdout.write = makeRedirect();
-  process.stderr.write = makeRedirect();
-
-  const log = (msg: string): void => {
-    logStream.write(`[${new Date().toISOString()}] ${msg}\n`);
-  };
+  const { log, onShutdown } = await setupHeadlessLog({
+    transport: app.recipe.logging?.headless?.transport ?? 'file',
+    dir: app.recipe.logging?.headless?.dir ?? dataDir,
+  });
 
   log(`headless start pid=${process.pid} dataDir=${dataDir} socket=${socketPath}`);
 
@@ -469,7 +440,9 @@ export async function runHeadless(app: AppContext, argv: string[] = []): Promise
     try { server.close(); } catch (err) { log(`server.close() failed: ${String(err)}`); }
     try { if (existsSync(socketPath)) unlinkSync(socketPath); } catch (err) { log(`socket unlink failed: ${String(err)}`); }
     try { if (existsSync(pidPath)) unlinkSync(pidPath); } catch (err) { log(`pid unlink failed: ${String(err)}`); }
-    try { logStream.end(); } catch { /* noop */ }
+    if (typeof onShutdown !== 'undefined') {
+      void onShutdown().catch(() => {});
+    }
 
     // Small delay so logStream.end() can flush before we exit.
     setTimeout(() => process.exit(0), 50);
